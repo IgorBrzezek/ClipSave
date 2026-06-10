@@ -166,3 +166,62 @@ Because it uses the native listener API, there is **no polling loop** — CPU us
 - **Author:** Igor Brzeżek
 - **Version:** 0.1
 - **GitHub:** [https://github.com/IgorBrzezek/ClipSave](https://github.com/IgorBrzezek/ClipSave)
+
+---
+
+## ANSI C version
+
+A standalone C port (`clipsave.c`) with identical functionality — no Python or Pillow required.
+
+### Requirements
+
+- **GCC** (MinGW-w64) — any recent version with `gcc` and `ld`
+- **Windows 10 or 11**
+- No third-party libraries — uses only built-in Windows APIs (GDI+, Win32)
+
+### Dependencies
+
+The only link-time dependencies are system libraries included with every Windows installation:
+
+| Library | Purpose |
+|---------|---------|
+| `gdiplus` | GDI+ — image encoding (PNG, JPEG, BMP) |
+| `gdi32` | GDI — `CreateDIBSection`, `DeleteObject` |
+| `ole32` | COM — GDI+ startup |
+| `uuid` | UUID — encoder CLSID lookup |
+
+All are available in any MinGW-w64 distribution (MSYS2, Cygwin, etc.).
+
+### Build
+
+```bash
+gcc -O2 -municode clipsave.c -lgdiplus -lgdi32 -lole32 -luuid -o clipsave.exe
+```
+
+Flags explained:
+- `-O2` — optimization level
+- `-municode` — use Unicode (`wmain`) entry point
+- `-l...` — link against system libraries
+
+The resulting binary is a standalone `.exe` (~170 KB) with no runtime dependencies beyond what Windows 10/11 provides.
+
+### Usage
+
+Same command-line interface as the Python version:
+
+```bash
+clipsave.exe -d C:\Screenshots -f jpg --bpp 24 -c 90
+clipsave.exe -f bmp --bpp 8 --name scan[N]
+clipsave.exe --name photo_[DT]_[NN] --overwrite
+```
+
+### Differences from the Python version
+
+| Aspect | Python | C |
+|--------|--------|---|
+| Runtime | Python 3.7+ + Pillow | Standalone `.exe` |
+| PNG sBIT chunk | Included for 16 bpp | Not included (GDI+ limitation) |
+| True 16-bit BMP | Manual BITFIELDS packing | GDI+ saves as 24-bit container |
+| Size | ~500 lines | ~750 lines |
+
+The core behavior, all options, and the clipboard-listener mechanism are identical.

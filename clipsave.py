@@ -11,7 +11,7 @@ Requirements: Python 3.7+, Pillow, Windows 10/11.
 
 SCRIPT_AUTH = "Igor Brzeżek"
 SCRIPT_VERSION = 0.1
-SCRIP_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
+SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 import sys
 import os
