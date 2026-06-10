@@ -10,9 +10,9 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 
 # Author
 
-SCRIPT_AUTH = "Igor Brzeżek"
-SCRIPT_VERSION = 0.1
-SCRIP_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
+- SCRIPT_AUTH = "Igor Brzeżek"
+- SCRIPT_VERSION = 0.1
+- SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 ## Requirements
 
