@@ -30,6 +30,7 @@
 #define APP_NAME L"ClipSave"
 #define HIDDEN_CLASS L"ClipSaveHiddenWnd"
 
+
 /* ── LUT tables for RGB565 quantization ───────────────────── */
 
 static BYTE LUT_R5[256], LUT_G6[256], LUT_B5[256];
@@ -562,18 +563,24 @@ static void print_banner(void) {
     else if (cfg.bpp == 'P') bpp_str = L"palette 256";
     else                    bpp_str = L"?";
 
+    WCHAR display_dir[MAX_PATH];
+    DWORD len = GetFullPathNameW(cfg.directory, MAX_PATH, display_dir, NULL);
+    if (len == 0 || len >= MAX_PATH)
+        wcscpy_s(display_dir, MAX_PATH, cfg.directory);
+
     wprintf(L"\n");
-    wprintf(L"  ===========================================\n");
+    wprintf(L"  ==========================================================\n");
     wprintf(L"    ClipSave - clipboard monitor active\n");
-    wprintf(L"  ===========================================\n");
-    wprintf(L"  Directory : %s\n", cfg.directory);
+    wprintf(L"    v0.1 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave\n");
+    wprintf(L"  ==========================================================\n");
+    wprintf(L"  Directory : %s\n", display_dir);
     wprintf(L"  Format    : %ls   BPP: ", cfg.fmt);
     if (cfg.bpp == 'P') wprintf(L"P"); else wprintf(L"%d", cfg.bpp);
     wprintf(L" (%s)\n", bpp_str);
     wprintf(L"  Names     : %s\n", cfg.name_mode);
     wprintf(L"\n");
     wprintf(L"  Waiting for images in clipboard...  (Ctrl+C = exit)\n");
-    wprintf(L"  -----------------------------------------------\n");
+    wprintf(L"  ----------------------------------------------------------\n");
     fflush(stdout);
 }
 
