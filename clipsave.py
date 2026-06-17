@@ -10,7 +10,7 @@ Requirements: Python 3.7+, Pillow, Windows 10/11.
 """
 
 SCRIPT_AUTH = "Igor Brzeżek"
-SCRIPT_VERSION = 0.1
+SCRIPT_VERSION = 0.4
 SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 import sys
@@ -56,11 +56,20 @@ Usage:  python clipsave.py [-d DIRECTORY] [-f FORMAT] [--bpp N] [--name MODE]
   -c N          JPG: quality 0-100 / PNG: compression 1-10  (see --help)
   --name MODE   DATETIME | pattern with [N] [D] [T] (default: DATETIME)
   --overwrite   Overwrite existing files without asking
+  --color       Colored terminal output (ANSI)
+  --beep        Beep on save and on overwrite prompt
+  --keys KEYS   Hotkey combination (default: CTRL-Shift-F11)
+                Format: MOD-MOD-KEY, e.g. CTRL-LeftALT-F12
+                Modifiers: CTRL, LeftCTRL, RightCTRL, ALT, LeftALT,
+                           RightALT, SHIFT, LeftSHIFT, RightSHIFT
+                Key: F1-F12, A-Z, 0-9
+
+Toggle: configurable hotkey (default: Ctrl+Shift+F11, use --keys)
 """
 
 LONG_HELP = """\
 ===================================================================
-          ClipSave - Windows Clipboard Monitor  v1.0
+          ClipSave - Windows Clipboard Monitor  v0.4
 ===================================================================
 
 DESCRIPTION
@@ -114,6 +123,30 @@ OPTIONS
   --overwrite     Overwrite existing files without asking.
                   Default: ask before overwriting.
 
+  --color         Colored terminal output (ANSI).
+                  Banner, filenames (jpg=magenta, png=cyan, bmp=yellow)
+                  and errors are colorized.
+
+  --beep          Play a short beep on successful save and a long
+                  beep when asking about overwriting an existing file.
+
+  --keys KEYS     Hotkey combination for toggling capture on/off.
+                  Format: MODIFIER-MODIFIER-KEY (3 hyphen-separated parts).
+                  Modifiers: CTRL | LeftCTRL | RightCTRL
+                             ALT  | LeftALT  | RightALT
+                             SHIFT| LeftSHIFT| RightSHIFT
+                  Key: F1-F12 | A-Z | 0-9
+                  Default: CTRL-Shift-F11
+                  Examples:
+                    --keys CTRL-Shift-F12
+                    --keys LeftCTRL-LeftALT-F5
+                    --keys ALT-Shift-A
+
+TOGGLE
+  Ctrl+Shift+F11  Enable/disable clipboard capture on the fly
+                  (customizable with --keys).
+                  Status updates in-place on the banner's second line.
+
 EXAMPLES
   python clipsave.py
       PNG, 16 bpp, current directory.
@@ -136,6 +169,86 @@ REQUIREMENTS
 
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
+WM_HOTKEY = 0x0312
+
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_LEFT = 0x8000
+MOD_RIGHT = 0x4000
+VK_F11 = 0x7A
+HOTKEY_ID = 1
+
+ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+STD_OUTPUT_HANDLE = -11
+ERROR_ALREADY_EXISTS = 183
+
+# Modifier name → (base_flag, side_flag)
+_MOD_MAP = {
+    "CTRL":      (MOD_CONTROL, 0),
+    "LEFTCTRL":  (MOD_CONTROL, MOD_LEFT),
+    "RIGHTCTRL": (MOD_CONTROL, MOD_RIGHT),
+    "ALT":       (MOD_ALT, 0),
+    "LEFTALT":   (MOD_ALT, MOD_LEFT),
+    "RIGHTALT":  (MOD_ALT, MOD_RIGHT),
+    "SHIFT":     (MOD_SHIFT, 0),
+    "LEFTSHIFT": (MOD_SHIFT, MOD_LEFT),
+    "RIGHTSHIFT":(MOD_SHIFT, MOD_RIGHT),
+}
+
+_MOD_DISPLAY = {
+    "CTRL":"Ctrl", "LEFTCTRL":"LeftCtrl", "RIGHTCTRL":"RightCtrl",
+    "ALT":"Alt", "LEFTALT":"LeftAlt", "RIGHTALT":"RightAlt",
+    "SHIFT":"Shift", "LEFTSHIFT":"LeftShift", "RIGHTSHIFT":"RightShift",
+}
+
+
+def parse_hotkey(s):
+    """Parse --keys string.  Returns (mod_flags, vk, display)."""
+    parts = s.split("-")
+    if len(parts) != 3:
+        raise ValueError("--keys needs exactly 3 hyphen-separated parts, "
+                         "e.g. CTRL-Shift-F11")
+
+    m1, m2, key = parts
+    m1u, m2u, ku = m1.upper(), m2.upper(), key.upper()
+
+    for label, raw in [("first", m1), ("second", m2)]:
+        if raw.upper() not in _MOD_MAP:
+            raise ValueError(f"Unknown {label} modifier '{raw}'. "
+                             "Valid: CTRL, LeftCTRL, RightCTRL, ALT, "
+                             "LeftALT, RightALT, SHIFT, LeftSHIFT, RightSHIFT")
+
+    base1, side1 = _MOD_MAP[m1u]
+    base2, side2 = _MOD_MAP[m2u]
+    if base1 == base2:
+        raise ValueError(f"Cannot use same modifier type twice "
+                         f"(got '{m1}' and '{m2}')")
+    mod_flags = base1 | base2 | side1 | side2
+
+    # Key
+    if ku.startswith("F") and 2 <= len(ku) <= 3:
+        try:
+            n = int(ku[1:])
+        except ValueError:
+            raise ValueError(f"Invalid F-key '{key}'")
+        if not 1 <= n <= 12:
+            raise ValueError(f"F-key number must be 1-12, got F{n}")
+        vk = 0x70 + n - 1
+        key_disp = ku
+    elif len(ku) == 1 and "A" <= ku <= "Z":
+        vk = ord(ku)
+        key_disp = ku
+    elif len(ku) == 1 and "0" <= ku <= "9":
+        vk = ord(ku)
+        key_disp = ku
+    else:
+        raise ValueError(f"Invalid key '{key}'. "
+                         "Must be F1-F12, a letter A-Z, or a digit 0-9")
+
+    d1 = _MOD_DISPLAY.get(m1u, m1u)
+    d2 = _MOD_DISPLAY.get(m2u, m2u)
+    return mod_flags, vk, f"{d1}-{d2}-{key_disp}"
 
 # LRESULT = c_ssize_t (8 bytes on x64, 4 on x86) — correct size
 LRESULT = ctypes.c_ssize_t
@@ -169,6 +282,94 @@ class WNDCLASSEXW(ctypes.Structure):
     ]
 
 
+class COORD(ctypes.Structure):
+    _fields_ = [("X", wt.SHORT), ("Y", wt.SHORT)]
+
+
+class SMALL_RECT(ctypes.Structure):
+    _fields_ = [
+        ("Left", wt.SHORT), ("Top", wt.SHORT),
+        ("Right", wt.SHORT), ("Bottom", wt.SHORT),
+    ]
+
+
+class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+    _fields_ = [
+        ("dwSize",              COORD),
+        ("dwCursorPosition",    COORD),
+        ("wAttributes",         wt.WORD),
+        ("srWindow",            SMALL_RECT),
+        ("dwMaximumWindowSize", COORD),
+    ]
+
+
+# Set argtypes for console/hotkey API
+kernel32.GetStdHandle.argtypes = [wt.DWORD]
+kernel32.GetStdHandle.restype = wt.HANDLE
+
+kernel32.GetConsoleMode.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+kernel32.GetConsoleMode.restype = wt.BOOL
+
+kernel32.SetConsoleMode.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.SetConsoleMode.restype = wt.BOOL
+
+kernel32.GetConsoleScreenBufferInfo.argtypes = [
+    wt.HANDLE, ctypes.POINTER(CONSOLE_SCREEN_BUFFER_INFO)
+]
+kernel32.GetConsoleScreenBufferInfo.restype = wt.BOOL
+
+kernel32.SetConsoleCursorPosition.argtypes = [wt.HANDLE, COORD]
+kernel32.SetConsoleCursorPosition.restype = wt.BOOL
+
+kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wt.HMODULE
+
+kernel32.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
+kernel32.CreateMutexW.restype = wt.HANDLE
+
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
+
+kernel32.Beep.argtypes = [wt.DWORD, wt.DWORD]
+kernel32.Beep.restype = wt.BOOL
+
+user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+user32.RegisterClassExW.restype = wt.ATOM
+
+user32.CreateWindowExW.argtypes = [
+    wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wt.HWND, wt.HMENU, wt.HINSTANCE, wt.LPVOID,
+]
+user32.CreateWindowExW.restype = wt.HWND
+
+user32.AddClipboardFormatListener.argtypes = [wt.HWND]
+user32.AddClipboardFormatListener.restype = wt.BOOL
+
+user32.RemoveClipboardFormatListener.argtypes = [wt.HWND]
+user32.RemoveClipboardFormatListener.restype = wt.BOOL
+
+user32.RegisterHotKey.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+user32.RegisterHotKey.restype = wt.BOOL
+
+user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(wt.MSG), wt.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
+]
+user32.PeekMessageW.restype = wt.BOOL
+
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.TranslateMessage.restype = wt.BOOL
+
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.DispatchMessageW.restype = LRESULT
+
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.PostQuitMessage.restype = None
+
+user32.DestroyWindow.argtypes = [wt.HWND]
+user32.DestroyWindow.restype = wt.BOOL
+
+
 # ── Main class ───────────────────────────────────────────────
 
 class ClipSave:
@@ -179,7 +380,8 @@ class ClipSave:
     _LUT_G6 = [(v >> 2) << 2 for v in range(256)]
     _LUT_B5 = [(v >> 3) << 3 for v in range(256)]
 
-    def __init__(self, directory, fmt, bpp, name_mode, overwrite, compression):
+    def __init__(self, directory, fmt, bpp, name_mode, overwrite, compression,
+                 color=False, beep=False, keys_modifiers=None, keys_vk=None, keys_display=None):
         self.directory = Path(directory).resolve()
         self.fmt = fmt.lower()
         self.bpp = bpp
@@ -195,6 +397,13 @@ class ClipSave:
         self._last_hash = None
         self._hwnd = None
         self._wndproc_ref = None  # prevent GC of the callback
+        self.color = color
+        self.beep = beep
+        self.active = True
+        self._status_row = -1
+        self._hotkey_modifiers = keys_modifiers if keys_modifiers is not None else (MOD_CONTROL | MOD_SHIFT)
+        self._hotkey_vk = keys_vk if keys_vk is not None else VK_F11
+        self._hotkey_display = keys_display if keys_display is not None else "Ctrl-Shift-F11"
 
         self.directory.mkdir(parents=True, exist_ok=True)
 
@@ -281,6 +490,9 @@ class ClipSave:
 
     def _on_clipboard(self):
         """Get image from clipboard and save."""
+        if not self.active:
+            return
+
         try:
             img = ImageGrab.grabclipboard()
         except Exception:
@@ -289,6 +501,10 @@ class ClipSave:
         if not isinstance(img, Image.Image):
             return
 
+        try:
+            img.load()
+        except Exception:
+            return
         ihash = self._image_hash(img)
         if ihash == self._last_hash:
             return
@@ -298,6 +514,7 @@ class ClipSave:
         fpath = self._make_filename()
 
         if fpath.exists() and not self.overwrite:
+            self._beep(300, 300)
             resp = input(f"  [?] File exists: {fpath.name}. Overwrite? [y/N] ")
             if resp.lower() != "y":
                 print("  [-] Skipped.")
@@ -317,8 +534,11 @@ class ClipSave:
 
         try:
             img.save(str(fpath), **save_kw)
-        except Exception as e:
-            print(f"  [!] Save error: {e}")
+        except Exception:
+            if self.color:
+                print(f"  \x1b[31m[!] Save error: {fpath.name} - WRITE ERROR!\x1b[0m")
+            else:
+                print(f"  [!] Save error: {fpath.name}")
             return
 
         self.counter += 1
@@ -328,8 +548,44 @@ class ClipSave:
             size_str = f"{sz / 1024:.1f} KB"
         else:
             size_str = f"{sz / 1_048_576:.1f} MB"
-        print(f"  [+] {fpath.name}  [{w}x{h} px, {size_str}]")
+        if self.color:
+            fmt_color = {"jpg": "\x1b[35m", "png": "\x1b[36m", "bmp": "\x1b[33m"}
+            c = fmt_color.get(self.fmt, "")
+            print(f"  [+] [{self.counter}] {c}{fpath.name}\x1b[0m  [{w}x{h} px, {size_str}]")
+        else:
+            print(f"  [+] [{self.counter}] {fpath.name}  [{w}x{h} px, {size_str}]")
         sys.stdout.flush()
+        self._beep(1500, 100)
+
+    # ── console helpers ─────────────────────────────────────
+
+    def _enable_ansi(self):
+        """Enable ANSI virtual terminal processing for colored output."""
+        hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = wt.DWORD()
+        if kernel32.GetConsoleMode(hcon, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(hcon, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+
+    def _update_status_line(self):
+        """Update the ON/OFF status on the banner's second line in-place."""
+        if self._status_row < 0:
+            return
+        hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        csbi = CONSOLE_SCREEN_BUFFER_INFO()
+        if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+            saved = COORD(csbi.dwCursorPosition.X, csbi.dwCursorPosition.Y)
+            target = COORD(0, self._status_row)
+            kernel32.SetConsoleCursorPosition(hcon, target)
+            if self.color:
+                onoff = "\x1b[32mON" if self.active else "\x1b[31mOFF"
+                print(f"    \x1b[1;37mClipSave - clipboard monitor active: {onoff}\x1b[0m  ", end="", flush=True)
+            else:
+                print(f"    ClipSave - clipboard monitor active: {'ON' if self.active else 'OFF'}  ", end="", flush=True)
+            kernel32.SetConsoleCursorPosition(hcon, saved)
+
+    def _beep(self, freq, dur):
+        if self.beep:
+            kernel32.Beep(freq, dur)
 
     # ── Windows message loop ───────────────────────────────────
 
@@ -337,6 +593,10 @@ class ClipSave:
         """Windows message callback."""
         if msg == WM_CLIPBOARDUPDATE:
             self._on_clipboard()
+            return 0
+        if msg == WM_HOTKEY and wparam == HOTKEY_ID:
+            self.active = not self.active
+            self._update_status_line()
             return 0
         if msg == WM_DESTROY:
             user32.RemoveClipboardFormatListener(hwnd)
@@ -390,19 +650,47 @@ class ClipSave:
     def run(self):
         """Run clipboard monitor."""
         bpp_desc = {8: "grayscale", "P": "palette 256", 16: "RGB565", 24: "full RGB"}
+
+        if self.color:
+            self._enable_ansi()
+            S = "\x1b[90m"; R = "\x1b[0m"
+            B = "\x1b[1;37m"; G = "\x1b[32m"
+            Y = "\x1b[33m"; C = "\x1b[36m"
+        else:
+            S = R = B = G = Y = C = ""
+
         print()
-        print("  ===============================================")
-        print("    ClipSave - clipboard monitor active")
-        print("  ===============================================")
-        print(f"  Directory : {self.directory}")
-        print(f"  Format  : {self.fmt.upper()}   BPP: {self.bpp} ({bpp_desc[self.bpp]})")
-        print(f"  Names   : {self.name_mode}")
+        print(f"{S}  =========================================================={R}")
+        onoff = f"{G}ON{R}" if self.color else "ON"
+        print(f"    {B}ClipSave - clipboard monitor active: {onoff}")
+        print(f"{S}    v0.4 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave{R}")
+        print(f"{S}  =========================================================={R}")
+        print(f"  {Y}Directory{R} : {C}{self.directory}{R}")
+        bpp_str = bpp_desc[self.bpp]
+        print(f"  {Y}Format{R}    : {C}{self.fmt.upper()}{R}   {Y}BPP{R}: {self.bpp} ({bpp_str})")
+        print(f"  {Y}Names{R}     : {C}{self.name_mode}{R}")
         print()
-        print("  Waiting for images in clipboard...  (Ctrl+C = exit)")
-        print("  " + "-" * 47)
+        print(f"{S}  Waiting for images in clipboard...  (Ctrl+C = exit){R}")
+        print(f"  Use {self._hotkey_display} to switch ON|OFF capturing")
+        print(f"{S}  ----------------------------------------------------------{R}")
         sys.stdout.flush()
 
+        # Store cursor position for banner updates (title line is 10 rows up)
+        hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        csbi = CONSOLE_SCREEN_BUFFER_INFO()
+        if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+            self._status_row = csbi.dwCursorPosition.Y - 10
+
         self._create_listener_window()
+        if not user32.RegisterHotKey(self._hwnd, HOTKEY_ID,
+                                     self._hotkey_modifiers, self._hotkey_vk):
+            base = self._hotkey_modifiers & ~(MOD_LEFT | MOD_RIGHT)
+            if base != self._hotkey_modifiers:
+                if not user32.RegisterHotKey(self._hwnd, HOTKEY_ID,
+                                             base, self._hotkey_vk):
+                    pass  # still fails — hotkey taken
+            else:
+                pass  # hotkey taken, no side flags to strip
 
         try:
             self._message_loop()
@@ -440,6 +728,11 @@ def parse_args(argv):
         "name": "DATETIME",
         "overwrite": False,
         "compression": -1,
+        "color": False,
+        "beep": False,
+        "keys_modifiers": MOD_CONTROL | MOD_SHIFT,
+        "keys_vk": VK_F11,
+        "keys_display": "Ctrl-Shift-F11",
     }
 
     i = 0
@@ -496,6 +789,24 @@ def parse_args(argv):
         elif arg == "--overwrite":
             cfg["overwrite"] = True
 
+        elif arg == "--color":
+            cfg["color"] = True
+
+        elif arg == "--beep":
+            cfg["beep"] = True
+
+        elif arg == "--keys":
+            i += 1
+            if i >= len(argv):
+                _die("--keys requires an argument, e.g. CTRL-Shift-F11")
+            try:
+                mod, vk, disp = parse_hotkey(argv[i])
+            except ValueError as e:
+                _die(str(e))
+            cfg["keys_modifiers"] = mod
+            cfg["keys_vk"] = vk
+            cfg["keys_display"] = disp
+
         else:
             _die(f"Unknown argument: {arg}\nUse -h to see help.")
 
@@ -504,9 +815,30 @@ def parse_args(argv):
     return cfg
 
 
+# ── Single-instance check ──────────────────────────────────────
+
+_mutex_handle = None
+
+MUTEX_NAME = "Local\\ClipSave_SingleInstanceMutex"
+
+
+def _check_single_instance():
+    global _mutex_handle
+    _mutex_handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not _mutex_handle:
+        return
+    if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(_mutex_handle)
+        _mutex_handle = None
+        print("ClipSave", file=sys.stderr)
+        print("       Please close the existing instance first.       (Only one ClipSave instance may run at a time.)", file=sys.stderr)
+        sys.exit(1)
+
+
 # ── Entry point ────────────────────────────────────────────────
 
 def main():
+    _check_single_instance()
     cfg = parse_args(sys.argv[1:])
     monitor = ClipSave(
         directory=cfg["directory"],
@@ -515,6 +847,11 @@ def main():
         name_mode=cfg["name"],
         overwrite=cfg["overwrite"],
         compression=cfg["compression"],
+        color=cfg["color"],
+        beep=cfg["beep"],
+        keys_modifiers=cfg["keys_modifiers"],
+        keys_vk=cfg["keys_vk"],
+        keys_display=cfg["keys_display"],
     )
     monitor.run()
 

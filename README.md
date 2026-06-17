@@ -11,13 +11,21 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 # Author
 
 - SCRIPT_AUTH = "Igor Brzeżek"
-- SCRIPT_VERSION = 0.3
+- SCRIPT_VERSION = 0.4
 - SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
+
+---
+
+# Python version
 
 ## Requirements
 
+- Python version:
 - **Python** 3.7 or newer
 - **Pillow** (`pip install Pillow`)
+- **Windows** 10 or 11
+
+- ANSI C version:
 - **Windows** 10 or 11
 
 ---
@@ -50,10 +58,23 @@ python clipsave.py [options]
 | `--name MODE` | Naming scheme — see below | `DATETIME` |
 | `--overwrite` | Overwrite existing files without asking | ask first |
 | `--color` | Colored terminal output (ANSI) | off |
+| `--beep` | Beep on save (short beep) and on overwrite prompt (long beep) _(C only)_ | off |
+| `--keys KEYS` | Hotkey combination (`MOD-MOD-KEY`, e.g. `CTRL-Shift-F11`, `LeftCTRL-LeftALT-F5`) | `CTRL-Shift-F11` |
 
 ### Toggle capture
 
-Press **Ctrl+Shift+F11** to enable/disable clipboard capture on the fly. The current status (ON/OFF) updates in-place on the banner's second line. With `--color`, ON is green, OFF is red.
+Press the configured hotkey (default **Ctrl+Shift+F11**) to enable/disable clipboard capture on the fly. The current status (ON/OFF) updates in-place on the banner's second line. With `--color`, ON is green, OFF is red.
+
+Customize with `--keys`:
+```bash
+python clipsave.py --keys LeftCTRL-LeftALT-F12
+python clipsave.py --keys CTRL-ALT-A
+python clipsave.py --keys ALT-Shift-5
+```
+
+Format: `MODIFIER-MODIFIER-KEY` (three hyphen-separated parts).
+- **Modifiers:** `CTRL`, `LeftCTRL`, `RightCTRL`, `ALT`, `LeftALT`, `RightALT`, `SHIFT`, `LeftSHIFT`, `RightSHIFT`
+- **Key:** `F1`–`F12`, `A`–`Z`, `0`–`9`
 
 ### Naming scheme (`--name`)
 
@@ -140,6 +161,12 @@ python clipsave.py -f png -c 10
 python clipsave.py --overwrite
 ```
 
+**Custom hotkey:**
+```bash
+python clipsave.py --keys LeftCTRL-LeftALT-F12
+python clipsave.py --keys CTRL-ALT-A --color
+```
+
 ---
 
 ## Stopping
@@ -169,14 +196,14 @@ Because it uses the native listener API, there is **no polling loop** — CPU us
 ## Project
 
 - **Author:** Igor Brzeżek
-- **Version:** 0.3
+- **Version:** 0.4
 - **GitHub:** [https://github.com/IgorBrzezek/ClipSave](https://github.com/IgorBrzezek/ClipSave)
 
 ---
 
 ## ANSI C version
 
-A standalone C port (`clipsave.c`) with identical functionality — no Python or Pillow required.
+A standalone C port (`clipsave.c`) with the same core functionality plus a few extras — no Python or Pillow required.
 
 ### Requirements
 
@@ -212,13 +239,16 @@ The resulting binary is a standalone `.exe` (~170 KB) with no runtime dependenci
 
 ### Usage
 
-Same command-line interface as the Python version:
+Almost identical CLI to the Python version — the same options plus a few extras:
 
 ```bash
 clipsave.exe -d C:\Screenshots -f jpg --bpp 24 -c 90
 clipsave.exe -f bmp --bpp 8 --name scan[N]
 clipsave.exe --name photo_[DT]_[NN] --overwrite
 clipsave.exe --color
+clipsave.exe --beep
+clipsave.exe --keys CTRL-LEFTALT-F12
+clipsave.exe --keys LeftCTRL-RightALT-F5
 ```
 
 ### Differences from the Python version
@@ -228,6 +258,9 @@ clipsave.exe --color
 | Runtime | Python 3.7+ + Pillow | Standalone `.exe` |
 | PNG sBIT chunk | Included for 16 bpp | Not included (GDI+ limitation) |
 | True 16-bit BMP | Manual BITFIELDS packing | GDI+ saves as 24-bit container |
-| Size | ~500 lines | ~800 lines |
+| `--beep` | Not supported | Supported (`Beep()` API) |
+| Instance detection | Not implemented | Detects another running ClipSave at startup |
+| Hotkey | `--keys` supported | `--keys` supported identically |
+| Size | ~860 lines | ~930 lines |
 
-The core behavior, all options, and the clipboard-listener mechanism are identical.
+The core clipboard-listener mechanism and most options are identical. The C version adds `--beep` and automatic instance detection.

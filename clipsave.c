@@ -34,6 +34,10 @@
 #define APP_NAME L"ClipSave"
 #define HIDDEN_CLASS L"ClipSaveHiddenWnd"
 
+#define AUTHOR L"Igor Brzezek"
+#define VERSION L"0.4"
+#define GITHUB L"https://github.com/IgorBrzezek/ClipSave"
+
 
 /* ── LUT tables for RGB565 quantization ───────────────────── */
 
@@ -74,7 +78,18 @@ static Config cfg = {
 #define HOTKEY_ID 1
 static int g_active = 1;
 static int g_color = 0;
+static int g_beep = 0;
 static SHORT g_status_row = -1;
+
+/* ── Hotkey configuration ─────────────────────────────────── */
+
+typedef struct {
+    int    mod;
+    UINT   vk;
+    WCHAR  display[64];
+} HotkeyCfg;
+
+static HotkeyCfg hotkey = { MOD_CONTROL | MOD_SHIFT, VK_F11, L"Ctrl-Shift-F11" };
 
 /* ── GDI+ init ────────────────────────────────────────────── */
 
@@ -275,13 +290,13 @@ static GpBitmap* apply_bpp(GpBitmap* src) {
 
 /* ── Save image via GDI+ ──────────────────────────────────── */
 
-static int save_image(GpBitmap* img, const WCHAR* path) {
+static int save_image(GpBitmap* img, const WCHAR* path, const WCHAR* fmt) {
     CLSID clsid;
     const WCHAR* mime;
 
-    if (wcscmp(cfg.fmt, L"jpg") == 0)
+    if (wcscmp(fmt, L"jpg") == 0)
         mime = L"image/jpeg";
-    else if (wcscmp(cfg.fmt, L"bmp") == 0)
+    else if (wcscmp(fmt, L"bmp") == 0)
         mime = L"image/bmp";
     else
         mime = L"image/png";
@@ -293,7 +308,7 @@ static int save_image(GpBitmap* img, const WCHAR* path) {
     ULONG quality_val = (ULONG)cfg.compression;
     enc_params.Count = 0;
 
-    if (wcscmp(cfg.fmt, L"jpg") == 0) {
+    if (wcscmp(fmt, L"jpg") == 0) {
         enc_params.Count = 1;
         enc_params.Parameter[0].Guid = EncoderQuality;
         enc_params.Parameter[0].Type = EncoderParameterValueTypeLong;
@@ -310,7 +325,7 @@ static int save_image(GpBitmap* img, const WCHAR* path) {
 
 static int counter = 0;
 
-static void make_filename(WCHAR* out, size_t out_sz) {
+static void make_filename(WCHAR* out, size_t out_sz, const WCHAR* fmt, const WCHAR* name_mode) {
     time_t t;
     struct tm tm;
     WCHAR stamp[64], date_str[16], time_str[16];
@@ -323,14 +338,14 @@ static void make_filename(WCHAR* out, size_t out_sz) {
     swprintf(time_str, 16, L"%02d%02d%02d",
         tm.tm_hour, tm.tm_min, tm.tm_sec);
 
-    if (_wcsicmp(cfg.name_mode, L"DATETIME") == 0) {
+    if (_wcsicmp(name_mode, L"DATETIME") == 0) {
         swprintf(stamp, 64, L"%s_%s_000", date_str, time_str);
-        swprintf(out, out_sz, L"%s\\clip_%s.%s", cfg.directory, stamp, cfg.fmt);
+        swprintf(out, out_sz, L"%s\\clip_%s.%s", cfg.directory, stamp, fmt);
         return;
     }
 
     WCHAR buf[256];
-    wcscpy_s(buf, 256, cfg.name_mode);
+    wcscpy_s(buf, 256, name_mode);
     WCHAR tmp[512];
     WCHAR* p;
 
@@ -370,7 +385,7 @@ static void make_filename(WCHAR* out, size_t out_sz) {
         wcscpy_s(buf, 256, tmp);
     }
 
-    swprintf(out, out_sz, L"%s\\%s.%s", cfg.directory, buf, cfg.fmt);
+    swprintf(out, out_sz, L"%s\\%s.%s", cfg.directory, buf, fmt);
 }
 
 /* ── Clipboard event handler ───────────────────────────────── */
@@ -379,6 +394,13 @@ static UINT64 last_hash = 0;
 
 static void on_clipboard(void) {
     if (!g_active) return;
+
+    /* Snapshot configuration at entry — guard against corruption */
+    WCHAR local_fmt[8];
+    WCHAR local_name[128];
+    wcscpy_s(local_fmt, 8, cfg.fmt);
+    wcscpy_s(local_name, 128, cfg.name_mode);
+
     if (!OpenClipboard(NULL)) return;
 
     HANDLE h = GetClipboardData(CF_DIB);
@@ -436,7 +458,7 @@ static void on_clipboard(void) {
 
     /* Build path */
     WCHAR path[MAX_PATH];
-    make_filename(path, MAX_PATH);
+    make_filename(path, MAX_PATH, local_fmt, local_name);
 
     /* Overwrite check */
     if (!cfg.overwrite) {
@@ -445,6 +467,7 @@ static void on_clipboard(void) {
             fclose(f);
             const WCHAR* base = wcsrchr(path, L'\\');
             base = base ? base + 1 : path;
+            if (g_beep) Beep(400, 600);
             wprintf(L"  [?] File exists: %s. Overwrite? [y/N] ", base);
             fflush(stdout);
             WCHAR ans[16];
@@ -460,7 +483,7 @@ static void on_clipboard(void) {
     }
 
     /* Save */
-    if (!save_image(final_img, path)) {
+    if (!save_image(final_img, path, local_fmt)) {
         if (g_color)
             wprintf(L"  \x1b[31m[!] Save error: %s - WRITE ERROR!\x1b[0m\n", path);
         else
@@ -471,6 +494,7 @@ static void on_clipboard(void) {
     }
 
     counter++;
+    if (g_beep) Beep(1200, 100);
     UINT img_w, img_h;
     GdipGetImageWidth((GpImage*)final_img, &img_w);
     GdipGetImageHeight((GpImage*)final_img, &img_h);
@@ -484,16 +508,18 @@ static void on_clipboard(void) {
     base = base ? base + 1 : path;
 
     if (sz < 1048576)
-        wprintf(L"  [+] %s%s%s  [%ux%u px, %.1f KB]\n",
-            g_color ? (wcscmp(cfg.fmt, L"jpg") == 0 ? L"\x1b[35m" :
-                       wcscmp(cfg.fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+        wprintf(L"  [+] %s[%d] %s%s  [%ux%u px, %.1f KB]\n",
+            g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
+                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+            counter,
             base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1024.0);
     else
-        wprintf(L"  [+] %s%s%s  [%ux%u px, %.1f MB]\n",
-            g_color ? (wcscmp(cfg.fmt, L"jpg") == 0 ? L"\x1b[35m" :
-                       wcscmp(cfg.fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+        wprintf(L"  [+] %s[%d] %s%s  [%ux%u px, %.1f MB]\n",
+            g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
+                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+            counter,
             base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1048576.0);
@@ -621,7 +647,7 @@ static void print_banner(void) {
     }
 
     wprintf(L"\n");
-    wprintf(L"  %s==========================================================\n",
+    wprintf(L"  %s=================================================================\n",
         g_color ? L"\x1b[90m" : L"");
     if (g_color) {
         wprintf(L"    \x1b[1;37mClipSave - clipboard monitor active: %s\x1b[0m\n",
@@ -629,9 +655,15 @@ static void print_banner(void) {
     } else {
         wprintf(L"    ClipSave - clipboard monitor active: %s\n", g_active ? L"ON" : L"OFF");
     }
-    wprintf(L"    %sv0.3 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave\n",
-        g_color ? L"\x1b[90m" : L"");
-    wprintf(L"  %s==========================================================\n",
+    {
+        HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (GetConsoleScreenBufferInfo(hCon, &csbi))
+            g_status_row = (SHORT)(csbi.dwCursorPosition.Y - 1);
+    }
+    wprintf(L"    %sv%s - %s - %s\n",
+        g_color ? L"\x1b[90m" : L"", VERSION, AUTHOR, GITHUB);
+    wprintf(L"  %s=================================================================\n",
         g_color ? L"\x1b[90m" : L"");
     wprintf(L"  %sDirectory\x1b[0m : \x1b[36m%s\x1b[0m\n",
         g_color ? L"\x1b[33m" : L"", display_dir);
@@ -644,15 +676,83 @@ static void print_banner(void) {
     wprintf(L"\n");
     wprintf(L"  %sWaiting for images in clipboard...  (Ctrl+C = exit)%s\n",
         g_color ? L"\x1b[90m" : L"", g_color ? L"\x1b[0m" : L"");
-    wprintf(L"  %s----------------------------------------------------------\n",
-        g_color ? L"\x1b[90m" : L"");
-    {
-        HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO csbi;
-        if (GetConsoleScreenBufferInfo(hCon, &csbi))
-            g_status_row = csbi.dwCursorPosition.Y - 9;
-    }
+    wprintf(L"  Use %s to switch ON|OFF capturing\n", hotkey.display);
+    wprintf(L"  %s-----------------------------------------------------------------%s\n",
+        g_color ? L"\x1b[90m" : L"",
+        g_color ? L"\x1b[0m" : L"");
     fflush(stdout);
+}
+
+/* ── Hotkey / Keys parsing ───────────────────────────────────────── */
+
+static void die(const WCHAR* msg);
+
+static const WCHAR* mod2_name(const WCHAR* low) {
+    if (wcscmp(low, L"alt") == 0)        return L"Alt";
+    if (wcscmp(low, L"leftalt") == 0)    return L"LeftAlt";
+    if (wcscmp(low, L"rightalt") == 0)   return L"RightAlt";
+    if (wcscmp(low, L"shift") == 0)      return L"Shift";
+    if (wcscmp(low, L"leftshift") == 0)  return L"LeftShift";
+    if (wcscmp(low, L"rightshift") == 0) return L"RightShift";
+    return L"?";
+}
+
+static void parse_keys(const WCHAR* str) {
+    WCHAR buf[128];
+    wcscpy_s(buf, 128, str);
+
+    WCHAR* parts[3];
+    int n = 0;
+    parts[n++] = buf;
+    for (int i = 0; buf[i]; i++) {
+        if (buf[i] == L'-') {
+            buf[i] = 0;
+            if (n >= 3) die(L"--keys: too many parts, use format MOD-MOD-KEY");
+            parts[n++] = buf + i + 1;
+        }
+    }
+    if (n != 3) die(L"--keys: expected 3 parts separated by '-' (e.g. CTRL-LEFTALT-F12)");
+
+    WCHAR low[3][64];
+    for (int i = 0; i < 3; i++) {
+        wcscpy_s(low[i], 64, parts[i]);
+        _wcslwr_s(low[i], wcslen(low[i]) + 1);
+    }
+
+    if (wcscmp(low[0], L"ctrl") != 0 && wcscmp(low[0], L"leftctrl") != 0 && wcscmp(low[0], L"rightctrl") != 0)
+        die(L"--keys: first part must be CTRL, LeftCTRL, or RightCTRL");
+
+    int mod2 = 0;
+    if (wcscmp(low[1], L"alt") == 0 || wcscmp(low[1], L"leftalt") == 0 || wcscmp(low[1], L"rightalt") == 0)
+        mod2 = MOD_ALT;
+    else if (wcscmp(low[1], L"shift") == 0 || wcscmp(low[1], L"leftshift") == 0 || wcscmp(low[1], L"rightshift") == 0)
+        mod2 = MOD_SHIFT;
+    else
+        die(L"--keys: second part must be ALT, LeftALT, RightALT, SHIFT, LeftSHIFT, or RightSHIFT");
+
+    UINT vk;
+    if (low[2][0] == L'f' && wcslen(low[2]) >= 2) {
+        int fn = _wtoi(low[2] + 1);
+        if (fn < 1 || fn > 12) die(L"--keys: F-key must be F1..F12");
+        vk = VK_F1 + fn - 1;
+    } else if (wcslen(low[2]) == 1 && low[2][0] >= L'a' && low[2][0] <= L'z') {
+        vk = (UINT)(low[2][0] - L'a' + L'A');
+    } else if (wcslen(low[2]) == 1 && low[2][0] >= L'0' && low[2][0] <= L'9') {
+        vk = (UINT)low[2][0];
+    } else {
+        die(L"--keys: third part must be F1..F12, A..Z, or 0..9");
+    }
+
+    hotkey.mod = MOD_CONTROL | mod2;
+    hotkey.vk   = vk;
+
+    WCHAR keyname[16];
+    if (vk >= VK_F1 && vk <= VK_F12)
+        swprintf(keyname, 16, L"F%d", vk - VK_F1 + 1);
+    else
+        swprintf(keyname, 16, L"%c", (WCHAR)vk);
+
+    swprintf(hotkey.display, 64, L"Ctrl-%s-%s", mod2_name(low[1]), keyname);
 }
 
 /* ── Argument parsing ──────────────────────────────────────────────── */
@@ -668,7 +768,7 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
         if (wcscmp(arg, L"--help") == 0) {
             wprintf(L"\n");
-            wprintf(L"ClipSave - Windows Clipboard Monitor  v0.3\n\n");
+            wprintf(L"ClipSave - Windows Clipboard Monitor  v%s\n\n", VERSION);
             wprintf(L"DESCRIPTION\n");
             wprintf(L"  Listens for clipboard image changes via AddClipboardFormatListener.\n");
             wprintf(L"  Saves images as PNG/JPEG/BMP with optional color depth conversion.\n\n");
@@ -690,15 +790,19 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"                     DATETIME  - clip_YYYYMMDD_HHMMSS.fmt\n");
             wprintf(L"                     pattern   - custom with [N][NN][D][T][DT][TD]\n");
             wprintf(L"  --overwrite      Overwrite existing files without asking\n");
-            wprintf(L"  --color          Colored terminal output\n\n");
+            wprintf(L"  --color          Colored terminal output\n");
+            wprintf(L"  --beep           Beep on save (short) and on overwrite prompt (long)\n");
+            wprintf(L"  --keys MOD-MOD-KEY  Custom hotkey (default: %s)\n", hotkey.display);
+            wprintf(L"                     Example: CTRL-LEFTALT-F12, Ctrl-Shift-A\n\n");
             wprintf(L"TOGGLE\n");
-            wprintf(L"  Ctrl+Shift+F11   Enable/disable clipboard capture on the fly\n\n");
+            wprintf(L"  %s   Enable/disable clipboard capture on the fly\n\n", hotkey.display);
             wprintf(L"EXAMPLES\n");
             wprintf(L"  clipsave.exe\n");
             wprintf(L"  clipsave.exe -d C:\\Screenshots -f jpg --bpp 24\n");
             wprintf(L"  clipsave.exe -f bmp --bpp 8 --name scan[N]\n");
             wprintf(L"  clipsave.exe --name photo_[DT]_[NN]\n");
-            wprintf(L"  clipsave.exe -f jpg -c 85\n\n");
+            wprintf(L"  clipsave.exe -f jpg -c 85\n");
+            wprintf(L"  clipsave.exe --keys CTRL-LEFTALT-F12\n\n");
             wprintf(L"STOPPING  Ctrl+C\n");
             wprintf(L"REQUIREMENTS  Windows 10/11\n");
             exit(0);
@@ -706,7 +810,7 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
         if (wcscmp(arg, L"-h") == 0) {
             wprintf(L"ClipSave - capture images from Windows clipboard\n");
-            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--name MODE] [--overwrite] [--color]\n");
+            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--name MODE] [--overwrite] [--color] [--beep] [--keys MOD-MOD-KEY]\n");
             wprintf(L"  -h             This help\n");
             wprintf(L"  --help         Full documentation\n");
             wprintf(L"  -d DIR         Target directory (default: .)\n");
@@ -716,7 +820,9 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"  --name MODE    DATETIME | pattern with [N] [D] [T]\n");
             wprintf(L"  --overwrite    Overwrite without asking\n");
             wprintf(L"  --color        Colored terminal output\n");
-            wprintf(L"  Ctrl+Shift+F11 Toggle capture on/off\n");
+            wprintf(L"  --beep         Beep on save / overwrite prompt\n");
+            wprintf(L"  --keys KEYS    Custom hotkey (default: %s)\n", hotkey.display);
+            wprintf(L"  %s Toggle capture on/off\n", hotkey.display);
             exit(0);
         }
 
@@ -731,6 +837,7 @@ static void parse_args(int argc, WCHAR* argv[]) {
             if (wcscmp(val, L"png") && wcscmp(val, L"jpg") && wcscmp(val, L"bmp"))
                 die(L"Unknown format. Allowed: png, jpg, bmp");
             wcscpy_s(cfg.fmt, 8, val);
+            _wcslwr_s(cfg.fmt, 8);
         }
         else if (wcscmp(arg, L"--bpp") == 0) {
             if (++i >= argc) die(L"--bpp requires an argument (8|P|16|24)");
@@ -759,6 +866,13 @@ static void parse_args(int argc, WCHAR* argv[]) {
         else if (wcscmp(arg, L"--color") == 0) {
             g_color = 1;
         }
+        else if (wcscmp(arg, L"--beep") == 0) {
+            g_beep = 1;
+        }
+        else if (wcscmp(arg, L"--keys") == 0) {
+            if (++i >= argc) die(L"--keys requires an argument (e.g. CTRL-LEFTALT-F12)");
+            parse_keys(argv[i]);
+        }
         else {
             WCHAR err[256];
             swprintf(err, 256, L"Unknown argument: %s\nUse -h to see help.", arg);
@@ -777,6 +891,18 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
 int wmain(int argc, WCHAR* argv[]) {
     parse_args(argc, argv);
+
+    /* Detect another ClipSave instance (C or Python) already running */
+    {
+        HWND h = FindWindowW(HIDDEN_CLASS, NULL);
+        if (h) {
+            wprintf(L"ERROR: Another ClipSave instance is already running.\n"
+                    L"       Please close the existing instance first.\n"
+                    L"       (Only one ClipSave instance may run at a time.)\n");
+            return 1;
+        }
+    }
+
     gdiplus_init();
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
     CreateDirectoryW(cfg.directory, NULL);
@@ -787,7 +913,8 @@ int wmain(int argc, WCHAR* argv[]) {
         return 1;
     }
 
-    RegisterHotKey(g_hwnd, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F11);
+    if (!RegisterHotKey(g_hwnd, HOTKEY_ID, hotkey.mod, hotkey.vk))
+        wprintf(L"WARNING: RegisterHotKey failed (%lu)\n", GetLastError());
 
     message_loop();
 
