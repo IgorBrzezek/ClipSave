@@ -11,7 +11,7 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 # Author
 
 - SCRIPT_AUTH = "Igor Brzeżek"
-- SCRIPT_VERSION = 0.1
+- SCRIPT_VERSION = 0.3
 - SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 ## Requirements
@@ -49,6 +49,11 @@ python clipsave.py [options]
 | `-c N` / `--compression N` | Compression level — see below | format default |
 | `--name MODE` | Naming scheme — see below | `DATETIME` |
 | `--overwrite` | Overwrite existing files without asking | ask first |
+| `--color` | Colored terminal output (ANSI) | off |
+
+### Toggle capture
+
+Press **Ctrl+Shift+F11** to enable/disable clipboard capture on the fly. The current status (ON/OFF) updates in-place on the banner's second line. With `--color`, ON is green, OFF is red.
 
 ### Naming scheme (`--name`)
 
@@ -164,7 +169,7 @@ Because it uses the native listener API, there is **no polling loop** — CPU us
 ## Project
 
 - **Author:** Igor Brzeżek
-- **Version:** 0.1
+- **Version:** 0.3
 - **GitHub:** [https://github.com/IgorBrzezek/ClipSave](https://github.com/IgorBrzezek/ClipSave)
 
 ---
@@ -213,6 +218,7 @@ Same command-line interface as the Python version:
 clipsave.exe -d C:\Screenshots -f jpg --bpp 24 -c 90
 clipsave.exe -f bmp --bpp 8 --name scan[N]
 clipsave.exe --name photo_[DT]_[NN] --overwrite
+clipsave.exe --color
 ```
 
 ### Differences from the Python version
@@ -222,6 +228,6 @@ clipsave.exe --name photo_[DT]_[NN] --overwrite
 | Runtime | Python 3.7+ + Pillow | Standalone `.exe` |
 | PNG sBIT chunk | Included for 16 bpp | Not included (GDI+ limitation) |
 | True 16-bit BMP | Manual BITFIELDS packing | GDI+ saves as 24-bit container |
-| Size | ~500 lines | ~750 lines |
+| Size | ~500 lines | ~800 lines |
 
 The core behavior, all options, and the clipboard-listener mechanism are identical.

@@ -5,7 +5,7 @@
  * Requires: Windows 10/11, GDI+ (built-in).
  *
  * Author:   Igor Brzeżek
- * Version:  0.1
+ * Version:  0.3
  * GitHub:   https://github.com/IgorBrzezek/ClipSave
  *
  * Build:  gcc -O2 -municode clipsave.c -lgdiplus -lgdi32 -lole32 -luuid -o clipsave.exe
@@ -13,6 +13,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+#include <WinCon.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #include <stdio.h>
@@ -66,6 +70,11 @@ static Config cfg = {
     0,
     -1,
 };
+
+#define HOTKEY_ID 1
+static int g_active = 1;
+static int g_color = 0;
+static SHORT g_status_row = -1;
 
 /* ── GDI+ init ────────────────────────────────────────────── */
 
@@ -369,6 +378,7 @@ static void make_filename(WCHAR* out, size_t out_sz) {
 static UINT64 last_hash = 0;
 
 static void on_clipboard(void) {
+    if (!g_active) return;
     if (!OpenClipboard(NULL)) return;
 
     HANDLE h = GetClipboardData(CF_DIB);
@@ -451,7 +461,10 @@ static void on_clipboard(void) {
 
     /* Save */
     if (!save_image(final_img, path)) {
-        wprintf(L"  [!] Save error: %s\n", path);
+        if (g_color)
+            wprintf(L"  \x1b[31m[!] Save error: %s - WRITE ERROR!\x1b[0m\n", path);
+        else
+            wprintf(L"  [!] Save error: %s\n", path);
         GdipDisposeImage((GpImage*)final_img);
         if (hbm) DeleteObject(hbm);
         return;
@@ -471,9 +484,19 @@ static void on_clipboard(void) {
     base = base ? base + 1 : path;
 
     if (sz < 1048576)
-        wprintf(L"  [+] %s  [%ux%u px, %.1f KB]\n", base, img_w, img_h, sz / 1024.0);
+        wprintf(L"  [+] %s%s%s  [%ux%u px, %.1f KB]\n",
+            g_color ? (wcscmp(cfg.fmt, L"jpg") == 0 ? L"\x1b[35m" :
+                       wcscmp(cfg.fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+            base,
+            g_color ? L"\x1b[0m" : L"",
+            img_w, img_h, sz / 1024.0);
     else
-        wprintf(L"  [+] %s  [%ux%u px, %.1f MB]\n", base, img_w, img_h, sz / 1048576.0);
+        wprintf(L"  [+] %s%s%s  [%ux%u px, %.1f MB]\n",
+            g_color ? (wcscmp(cfg.fmt, L"jpg") == 0 ? L"\x1b[35m" :
+                       wcscmp(cfg.fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+            base,
+            g_color ? L"\x1b[0m" : L"",
+            img_w, img_h, sz / 1048576.0);
     fflush(stdout);
 
     GdipDisposeImage((GpImage*)final_img);
@@ -489,8 +512,30 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         on_clipboard();
         return 0;
     }
+    if (msg == WM_HOTKEY && wp == HOTKEY_ID) {
+        g_active = !g_active;
+        if (g_status_row >= 0) {
+            HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+            CONSOLE_SCREEN_BUFFER_INFO csbi;
+            if (GetConsoleScreenBufferInfo(hCon, &csbi)) {
+                COORD saved = csbi.dwCursorPosition;
+                COORD target = { 0, g_status_row };
+                SetConsoleCursorPosition(hCon, target);
+                if (g_color)
+                    wprintf(L"    \x1b[1;37mClipSave - clipboard monitor active: %s\x1b[0m  ",
+                        g_active ? L"\x1b[32mON" : L"\x1b[31mOFF");
+                else
+                    wprintf(L"    ClipSave - clipboard monitor active: %s  ",
+                        g_active ? L"ON" : L"OFF");
+                SetConsoleCursorPosition(hCon, saved);
+            }
+        }
+        fflush(stdout);
+        return 0;
+    }
     if (msg == WM_DESTROY) {
         RemoveClipboardFormatListener(hwnd);
+        UnregisterHotKey(hwnd, HOTKEY_ID);
         PostQuitMessage(0);
         return 0;
     }
@@ -568,19 +613,45 @@ static void print_banner(void) {
     if (len == 0 || len >= MAX_PATH)
         wcscpy_s(display_dir, MAX_PATH, cfg.directory);
 
+    if (g_color) {
+        HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (GetConsoleMode(hCon, &mode))
+            SetConsoleMode(hCon, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+
     wprintf(L"\n");
-    wprintf(L"  ==========================================================\n");
-    wprintf(L"    ClipSave - clipboard monitor active\n");
-    wprintf(L"    v0.1 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave\n");
-    wprintf(L"  ==========================================================\n");
-    wprintf(L"  Directory : %s\n", display_dir);
-    wprintf(L"  Format    : %ls   BPP: ", cfg.fmt);
+    wprintf(L"  %s==========================================================\n",
+        g_color ? L"\x1b[90m" : L"");
+    if (g_color) {
+        wprintf(L"    \x1b[1;37mClipSave - clipboard monitor active: %s\x1b[0m\n",
+            g_active ? L"\x1b[32mON\x1b[1;37m" : L"\x1b[31mOFF\x1b[1;37m");
+    } else {
+        wprintf(L"    ClipSave - clipboard monitor active: %s\n", g_active ? L"ON" : L"OFF");
+    }
+    wprintf(L"    %sv0.3 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave\n",
+        g_color ? L"\x1b[90m" : L"");
+    wprintf(L"  %s==========================================================\n",
+        g_color ? L"\x1b[90m" : L"");
+    wprintf(L"  %sDirectory\x1b[0m : \x1b[36m%s\x1b[0m\n",
+        g_color ? L"\x1b[33m" : L"", display_dir);
+    wprintf(L"  %sFormat\x1b[0m    : \x1b[36m%ls", g_color ? L"\x1b[33m" : L"", cfg.fmt);
+    wprintf(L"   %sBPP\x1b[0m: ", g_color ? L"\x1b[33m" : L"");
     if (cfg.bpp == 'P') wprintf(L"P"); else wprintf(L"%d", cfg.bpp);
     wprintf(L" (%s)\n", bpp_str);
-    wprintf(L"  Names     : %s\n", cfg.name_mode);
+    wprintf(L"  %sNames\x1b[0m     : \x1b[36m%s\x1b[0m\n",
+        g_color ? L"\x1b[33m" : L"", cfg.name_mode);
     wprintf(L"\n");
-    wprintf(L"  Waiting for images in clipboard...  (Ctrl+C = exit)\n");
-    wprintf(L"  ----------------------------------------------------------\n");
+    wprintf(L"  %sWaiting for images in clipboard...  (Ctrl+C = exit)%s\n",
+        g_color ? L"\x1b[90m" : L"", g_color ? L"\x1b[0m" : L"");
+    wprintf(L"  %s----------------------------------------------------------\n",
+        g_color ? L"\x1b[90m" : L"");
+    {
+        HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (GetConsoleScreenBufferInfo(hCon, &csbi))
+            g_status_row = csbi.dwCursorPosition.Y - 9;
+    }
     fflush(stdout);
 }
 
@@ -597,7 +668,7 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
         if (wcscmp(arg, L"--help") == 0) {
             wprintf(L"\n");
-            wprintf(L"ClipSave - Windows Clipboard Monitor  v0.1\n\n");
+            wprintf(L"ClipSave - Windows Clipboard Monitor  v0.3\n\n");
             wprintf(L"DESCRIPTION\n");
             wprintf(L"  Listens for clipboard image changes via AddClipboardFormatListener.\n");
             wprintf(L"  Saves images as PNG/JPEG/BMP with optional color depth conversion.\n\n");
@@ -618,7 +689,10 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"  --name MODE      Naming scheme:\n");
             wprintf(L"                     DATETIME  - clip_YYYYMMDD_HHMMSS.fmt\n");
             wprintf(L"                     pattern   - custom with [N][NN][D][T][DT][TD]\n");
-            wprintf(L"  --overwrite      Overwrite existing files without asking\n\n");
+            wprintf(L"  --overwrite      Overwrite existing files without asking\n");
+            wprintf(L"  --color          Colored terminal output\n\n");
+            wprintf(L"TOGGLE\n");
+            wprintf(L"  Ctrl+Shift+F11   Enable/disable clipboard capture on the fly\n\n");
             wprintf(L"EXAMPLES\n");
             wprintf(L"  clipsave.exe\n");
             wprintf(L"  clipsave.exe -d C:\\Screenshots -f jpg --bpp 24\n");
@@ -632,7 +706,7 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
         if (wcscmp(arg, L"-h") == 0) {
             wprintf(L"ClipSave - capture images from Windows clipboard\n");
-            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--name MODE] [--overwrite]\n");
+            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--name MODE] [--overwrite] [--color]\n");
             wprintf(L"  -h             This help\n");
             wprintf(L"  --help         Full documentation\n");
             wprintf(L"  -d DIR         Target directory (default: .)\n");
@@ -641,6 +715,8 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"  -c N           JPG: quality 0-100 / PNG: compression 1-10\n");
             wprintf(L"  --name MODE    DATETIME | pattern with [N] [D] [T]\n");
             wprintf(L"  --overwrite    Overwrite without asking\n");
+            wprintf(L"  --color        Colored terminal output\n");
+            wprintf(L"  Ctrl+Shift+F11 Toggle capture on/off\n");
             exit(0);
         }
 
@@ -680,6 +756,9 @@ static void parse_args(int argc, WCHAR* argv[]) {
         else if (wcscmp(arg, L"--overwrite") == 0) {
             cfg.overwrite = 1;
         }
+        else if (wcscmp(arg, L"--color") == 0) {
+            g_color = 1;
+        }
         else {
             WCHAR err[256];
             swprintf(err, 256, L"Unknown argument: %s\nUse -h to see help.", arg);
@@ -707,6 +786,8 @@ int wmain(int argc, WCHAR* argv[]) {
         gdiplus_shutdown();
         return 1;
     }
+
+    RegisterHotKey(g_hwnd, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_F11);
 
     message_loop();
 
