@@ -58,7 +58,7 @@ python clipsave.py [options]
 | `--name MODE` | Naming scheme — see below | `DATETIME` |
 | `--overwrite` | Overwrite existing files without asking | ask first |
 | `--color` | Colored terminal output (ANSI) | off |
-| `--beep` | Beep on save (short beep) and on overwrite prompt (long beep) _(C only)_ | off |
+| `--beep` | Beep on save (short beep) and on overwrite prompt (long beep) | off |
 | `--keys KEYS` | Hotkey combination (`MOD-MOD-KEY`, e.g. `CTRL-Shift-F11`, `LeftCTRL-LeftALT-F5`) | `CTRL-Shift-F11` |
 
 ### Toggle capture
@@ -161,6 +161,12 @@ python clipsave.py -f png -c 10
 python clipsave.py --overwrite
 ```
 
+**Audible beep on capture:**
+```bash
+python clipsave.py --beep
+python clipsave.py --beep --color
+```
+
 **Custom hotkey:**
 ```bash
 python clipsave.py --keys LeftCTRL-LeftALT-F12
@@ -203,7 +209,7 @@ Because it uses the native listener API, there is **no polling loop** — CPU us
 
 ## ANSI C version
 
-A standalone C port (`clipsave.c`) with the same core functionality plus a few extras — no Python or Pillow required.
+A standalone C port (`clipsave.c`) with identical functionality — no Python or Pillow required.
 
 ### Requirements
 
@@ -239,7 +245,7 @@ The resulting binary is a standalone `.exe` (~170 KB) with no runtime dependenci
 
 ### Usage
 
-Almost identical CLI to the Python version — the same options plus a few extras:
+Same command-line interface as the Python version:
 
 ```bash
 clipsave.exe -d C:\Screenshots -f jpg --bpp 24 -c 90
@@ -258,9 +264,9 @@ clipsave.exe --keys LeftCTRL-RightALT-F5
 | Runtime | Python 3.7+ + Pillow | Standalone `.exe` |
 | PNG sBIT chunk | Included for 16 bpp | Not included (GDI+ limitation) |
 | True 16-bit BMP | Manual BITFIELDS packing | GDI+ saves as 24-bit container |
-| `--beep` | Not supported | Supported (`Beep()` API) |
-| Instance detection | Not implemented | Detects another running ClipSave at startup |
+| `--beep` | Supported (`kernel32.Beep`) | Supported (`Beep()` API) |
+| Instance detection | Mutex-based (`CreateMutexW`) | Window-based (`FindWindowW`) |
 | Hotkey | `--keys` supported | `--keys` supported identically |
 | Size | ~860 lines | ~930 lines |
 
-The core clipboard-listener mechanism and most options are identical. The C version adds `--beep` and automatic instance detection.
+The core clipboard-listener mechanism and all options are identical across both versions. Instance detection uses a different technique (mutex vs. window lookup) but achieves the same goal.

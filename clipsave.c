@@ -12,6 +12,7 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0600
 #include <windows.h>
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
@@ -665,14 +666,27 @@ static void print_banner(void) {
         g_color ? L"\x1b[90m" : L"", VERSION, AUTHOR, GITHUB);
     wprintf(L"  %s=================================================================\n",
         g_color ? L"\x1b[90m" : L"");
-    wprintf(L"  %sDirectory\x1b[0m : \x1b[36m%s\x1b[0m\n",
-        g_color ? L"\x1b[33m" : L"", display_dir);
-    wprintf(L"  %sFormat\x1b[0m    : \x1b[36m%ls", g_color ? L"\x1b[33m" : L"", cfg.fmt);
-    wprintf(L"   %sBPP\x1b[0m: ", g_color ? L"\x1b[33m" : L"");
+    wprintf(L"  %sDirectory%s : %s%s%s\n",
+        g_color ? L"\x1b[33m" : L"",
+        g_color ? L"\x1b[0m" : L"",
+        g_color ? L"\x1b[36m" : L"",
+        display_dir,
+        g_color ? L"\x1b[0m" : L"");
+    wprintf(L"  %sFormat%s    : %s%ls%s",
+        g_color ? L"\x1b[33m" : L"",
+        g_color ? L"\x1b[0m" : L"",
+        g_color ? L"\x1b[36m" : L"",
+        cfg.fmt,
+        g_color ? L"\x1b[0m" : L"");
+    wprintf(L"   %sBPP%s: ", g_color ? L"\x1b[33m" : L"", g_color ? L"\x1b[0m" : L"");
     if (cfg.bpp == 'P') wprintf(L"P"); else wprintf(L"%d", cfg.bpp);
     wprintf(L" (%s)\n", bpp_str);
-    wprintf(L"  %sNames\x1b[0m     : \x1b[36m%s\x1b[0m\n",
-        g_color ? L"\x1b[33m" : L"", cfg.name_mode);
+    wprintf(L"  %sNames%s     : %s%s%s\n",
+        g_color ? L"\x1b[33m" : L"",
+        g_color ? L"\x1b[0m" : L"",
+        g_color ? L"\x1b[36m" : L"",
+        cfg.name_mode,
+        g_color ? L"\x1b[0m" : L"");
     wprintf(L"\n");
     wprintf(L"  %sWaiting for images in clipboard...  (Ctrl+C = exit)%s\n",
         g_color ? L"\x1b[90m" : L"", g_color ? L"\x1b[0m" : L"");
