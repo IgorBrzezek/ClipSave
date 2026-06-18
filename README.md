@@ -11,7 +11,7 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 # Author
 
 - SCRIPT_AUTH = "Igor Brzeżek"
-- SCRIPT_VERSION = 0.4
+- SCRIPT_VERSION = 0.5
 - SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 ---
@@ -58,7 +58,7 @@ python clipsave.py [options]
 | `--name MODE` | Naming scheme — see below | `DATETIME` |
 | `--overwrite` | Overwrite existing files without asking | ask first |
 | `--color` | Colored terminal output (ANSI) | off |
-| `--beep` | Beep on save (short beep) and on overwrite prompt (long beep) | off |
+| `--beep` | Beep on save (short beep), on overwrite prompt (long beep), and on duplicate clipboard data (medium beep) | off |
 | `--keys KEYS` | Hotkey combination (`MOD-MOD-KEY`, e.g. `CTRL-Shift-F11`, `LeftCTRL-LeftALT-F5`) | `CTRL-Shift-F11` |
 
 ### Toggle capture
@@ -167,6 +167,8 @@ python clipsave.py --beep
 python clipsave.py --beep --color
 ```
 
+Three distinct beep sounds: short (1500 Hz) on save, medium (600 Hz) on duplicate clipboard data, long (300 Hz) on overwrite prompt.
+
 **Custom hotkey:**
 ```bash
 python clipsave.py --keys LeftCTRL-LeftALT-F12
@@ -202,7 +204,7 @@ Because it uses the native listener API, there is **no polling loop** — CPU us
 ## Project
 
 - **Author:** Igor Brzeżek
-- **Version:** 0.4
+- **Version:** 0.5
 - **GitHub:** [https://github.com/IgorBrzezek/ClipSave](https://github.com/IgorBrzezek/ClipSave)
 
 ---
@@ -267,6 +269,6 @@ clipsave.exe --keys LeftCTRL-RightALT-F5
 | `--beep` | Supported (`kernel32.Beep`) | Supported (`Beep()` API) |
 | Instance detection | Mutex-based (`CreateMutexW`) | Window-based (`FindWindowW`) |
 | Hotkey | `--keys` supported | `--keys` supported identically |
-| Size | ~860 lines | ~930 lines |
+| Size | ~860 lines | ~940 lines |
 
 The core clipboard-listener mechanism and all options are identical across both versions. Instance detection uses a different technique (mutex vs. window lookup) but achieves the same goal.

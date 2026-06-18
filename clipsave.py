@@ -10,7 +10,7 @@ Requirements: Python 3.7+, Pillow, Windows 10/11.
 """
 
 SCRIPT_AUTH = "Igor Brzeżek"
-SCRIPT_VERSION = 0.4
+SCRIPT_VERSION = 0.5
 SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 import sys
@@ -69,7 +69,7 @@ Toggle: configurable hotkey (default: Ctrl+Shift+F11, use --keys)
 
 LONG_HELP = """\
 ===================================================================
-          ClipSave - Windows Clipboard Monitor  v0.4
+           ClipSave - Windows Clipboard Monitor  v0.5
 ===================================================================
 
 DESCRIPTION
@@ -181,7 +181,13 @@ HOTKEY_ID = 1
 
 ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 STD_OUTPUT_HANDLE = -11
+STD_INPUT_HANDLE = -10
 ERROR_ALREADY_EXISTS = 183
+KEY_EVENT = 0x0001
+VK_UP = 0x26
+VK_DOWN = 0x28
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
 # Modifier name → (base_flag, side_flag)
 _MOD_MAP = {
@@ -303,6 +309,30 @@ class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
     ]
 
 
+class KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("bKeyDown", wt.BOOL),
+        ("wRepeatCount", wt.WORD),
+        ("wVirtualKeyCode", wt.WORD),
+        ("wVirtualScanCode", wt.WORD),
+        ("uChar", ctypes.c_wchar),
+        ("dwControlKeyState", wt.DWORD),
+    ]
+
+
+class _INPUT_RECORD_EVENT(ctypes.Union):
+    _fields_ = [
+        ("KeyEvent", KEY_EVENT_RECORD),
+    ]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", wt.WORD),
+        ("Event", _INPUT_RECORD_EVENT),
+    ]
+
+
 # Set argtypes for console/hotkey API
 kernel32.GetStdHandle.argtypes = [wt.DWORD]
 kernel32.GetStdHandle.restype = wt.HANDLE
@@ -332,6 +362,34 @@ kernel32.CloseHandle.restype = wt.BOOL
 
 kernel32.Beep.argtypes = [wt.DWORD, wt.DWORD]
 kernel32.Beep.restype = wt.BOOL
+
+kernel32.PeekConsoleInputW.argtypes = [
+    wt.HANDLE, ctypes.POINTER(INPUT_RECORD), wt.DWORD, ctypes.POINTER(wt.DWORD)
+]
+kernel32.PeekConsoleInputW.restype = wt.BOOL
+
+kernel32.ReadConsoleInputW.argtypes = [
+    wt.HANDLE, ctypes.POINTER(INPUT_RECORD), wt.DWORD, ctypes.POINTER(wt.DWORD)
+]
+kernel32.ReadConsoleInputW.restype = wt.BOOL
+
+kernel32.SetConsoleScreenBufferSize.argtypes = [wt.HANDLE, COORD]
+kernel32.SetConsoleScreenBufferSize.restype = wt.BOOL
+
+kernel32.FillConsoleOutputCharacterW.argtypes = [
+    wt.HANDLE, ctypes.c_wchar, wt.DWORD, COORD, ctypes.POINTER(wt.DWORD)
+]
+kernel32.FillConsoleOutputCharacterW.restype = wt.BOOL
+
+kernel32.FillConsoleOutputAttribute.argtypes = [
+    wt.HANDLE, wt.WORD, wt.DWORD, COORD, ctypes.POINTER(wt.DWORD)
+]
+kernel32.FillConsoleOutputAttribute.restype = wt.BOOL
+
+kernel32.WriteConsoleW.argtypes = [
+    wt.HANDLE, wt.LPCVOID, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID,
+]
+kernel32.WriteConsoleW.restype = wt.BOOL
 
 user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
 user32.RegisterClassExW.restype = wt.ATOM
@@ -404,6 +462,12 @@ class ClipSave:
         self._hotkey_modifiers = keys_modifiers if keys_modifiers is not None else (MOD_CONTROL | MOD_SHIFT)
         self._hotkey_vk = keys_vk if keys_vk is not None else VK_F11
         self._hotkey_display = keys_display if keys_display is not None else "Ctrl-Shift-F11"
+
+        self._file_lines = []
+        self._scroll_offset = 0
+        self._auto_scroll = True
+        self._scroll_top = -1
+        self._hstdin = kernel32.GetStdHandle(STD_INPUT_HANDLE)
 
         self.directory.mkdir(parents=True, exist_ok=True)
 
@@ -507,6 +571,16 @@ class ClipSave:
             return
         ihash = self._image_hash(img)
         if ihash == self._last_hash:
+            self._beep(600, 100)
+            self._file_lines.append(f"  [-] Duplicate data in clipboard")
+            if self._auto_scroll and self._scroll_top >= 0:
+                hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+                csbi = CONSOLE_SCREEN_BUFFER_INFO()
+                if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+                    visible_rows = csbi.srWindow.Bottom - self._scroll_top + 1
+                    if visible_rows > 0:
+                        self._scroll_offset = max(0, len(self._file_lines) - visible_rows)
+            self._redraw_file_list()
             return
         self._last_hash = ihash
 
@@ -515,9 +589,13 @@ class ClipSave:
 
         if fpath.exists() and not self.overwrite:
             self._beep(300, 300)
+            if self._scroll_top >= 0:
+                hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+                kernel32.SetConsoleCursorPosition(hcon, COORD(0, self._scroll_top))
             resp = input(f"  [?] File exists: {fpath.name}. Overwrite? [y/N] ")
             if resp.lower() != "y":
                 print("  [-] Skipped.")
+                self._redraw_file_list()
                 return
 
         save_kw = {}
@@ -551,10 +629,18 @@ class ClipSave:
         if self.color:
             fmt_color = {"jpg": "\x1b[35m", "png": "\x1b[36m", "bmp": "\x1b[33m"}
             c = fmt_color.get(self.fmt, "")
-            print(f"  [+] [{self.counter}] {c}{fpath.name}\x1b[0m  [{w}x{h} px, {size_str}]")
+            line = f"  [+] [{self.counter}] {c}{fpath.name}\x1b[0m  [{w}x{h} px, {size_str}]"
         else:
-            print(f"  [+] [{self.counter}] {fpath.name}  [{w}x{h} px, {size_str}]")
-        sys.stdout.flush()
+            line = f"  [+] [{self.counter}] {fpath.name}  [{w}x{h} px, {size_str}]"
+        self._file_lines.append(line)
+        if self._auto_scroll and self._scroll_top >= 0:
+            hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            csbi = CONSOLE_SCREEN_BUFFER_INFO()
+            if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+                visible_rows = csbi.srWindow.Bottom - self._scroll_top + 1
+                if visible_rows > 0:
+                    self._scroll_offset = max(0, len(self._file_lines) - visible_rows)
+        self._redraw_file_list()
         self._beep(1500, 100)
 
     # ── console helpers ─────────────────────────────────────
@@ -586,6 +672,88 @@ class ClipSave:
     def _beep(self, freq, dur):
         if self.beep:
             kernel32.Beep(freq, dur)
+
+    @staticmethod
+    def _visible_len(text):
+        return len(_ANSI_RE.sub('', text))
+
+    def _redraw_file_list(self):
+        if self._scroll_top < 0:
+            return
+        hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        csbi = CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+            return
+        window_bottom = csbi.srWindow.Bottom
+        visible_rows = window_bottom - self._scroll_top + 1
+        if visible_rows <= 0:
+            return
+
+        total = len(self._file_lines)
+        max_offset = max(0, total - visible_rows)
+        if self._scroll_offset > max_offset:
+            self._scroll_offset = max_offset
+        if self._scroll_offset < 0:
+            self._scroll_offset = 0
+
+        width = csbi.dwSize.X
+        written = wt.DWORD(0)
+        for i in range(visible_rows):
+            idx = self._scroll_offset + i
+            coord = COORD(0, self._scroll_top + i)
+            kernel32.SetConsoleCursorPosition(hcon, coord)
+            if idx < total:
+                line = self._file_lines[idx]
+                vis_len = self._visible_len(line)
+                if vis_len < width:
+                    line += ' ' * (width - vis_len)
+                kernel32.WriteConsoleW(hcon, line, len(line), ctypes.byref(written), None)
+            else:
+                kernel32.WriteConsoleW(hcon, ' ' * width, width, ctypes.byref(written), None)
+
+    def _check_arrow_keys(self):
+        if not self._file_lines or self._scroll_top < 0:
+            return
+        hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        csbi = CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+            return
+        window_bottom = csbi.srWindow.Bottom
+        visible_rows = window_bottom - self._scroll_top + 1
+        if visible_rows <= 0:
+            return
+        total = len(self._file_lines)
+        max_off = max(0, total - visible_rows)
+
+        ir = INPUT_RECORD()
+        read = wt.DWORD(0)
+        if not kernel32.PeekConsoleInputW(self._hstdin, ctypes.byref(ir), 1, ctypes.byref(read)):
+            return
+        if read.value == 0:
+            return
+
+        # Consume non-keyboard events (focus, menu, etc.) and key-up events
+        if ir.EventType != KEY_EVENT or not ir.Event.KeyEvent.bKeyDown:
+            kernel32.ReadConsoleInputW(self._hstdin, ctypes.byref(ir), 1, ctypes.byref(read))
+            return
+
+        vk = ir.Event.KeyEvent.wVirtualKeyCode
+        if vk != VK_UP and vk != VK_DOWN:
+            kernel32.ReadConsoleInputW(self._hstdin, ctypes.byref(ir), 1, ctypes.byref(read))
+            return
+
+        # Consume the arrow key event
+        kernel32.ReadConsoleInputW(self._hstdin, ctypes.byref(ir), 1, ctypes.byref(read))
+
+        if vk == VK_UP and self._scroll_offset > 0:
+            self._scroll_offset -= 1
+            self._auto_scroll = False
+            self._redraw_file_list()
+        elif vk == VK_DOWN and self._scroll_offset < max_off:
+            self._scroll_offset += 1
+            if self._scroll_offset >= max_off:
+                self._auto_scroll = True
+            self._redraw_file_list()
 
     # ── Windows message loop ───────────────────────────────────
 
@@ -643,6 +811,7 @@ class ClipSave:
                     return
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
+            self._check_arrow_keys()
             time.sleep(0.05)
 
     # ── startup ───────────────────────────────────────────
@@ -659,11 +828,13 @@ class ClipSave:
         else:
             S = R = B = G = Y = C = ""
 
+        os.system('cls')
+
         print()
         print(f"{S}  =========================================================={R}")
-        onoff = f"{G}ON{R}" if self.color else "ON"
-        print(f"    {B}ClipSave - clipboard monitor active: {onoff}")
-        print(f"{S}    v0.4 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave{R}")
+        onoff_fmt = f"{G}ON{R}" if self.color else "ON"
+        print(f"    {B}ClipSave - clipboard monitor active: {onoff_fmt}")
+        print(f"{S}    v0.5 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave{R}")
         print(f"{S}  =========================================================={R}")
         print(f"  {Y}Directory{R} : {C}{self.directory}{R}")
         bpp_str = bpp_desc[self.bpp]
@@ -672,14 +843,15 @@ class ClipSave:
         print()
         print(f"{S}  Waiting for images in clipboard...  (Ctrl+C = exit){R}")
         print(f"  Use {self._hotkey_display} to switch ON|OFF capturing")
-        print(f"{S}  ----------------------------------------------------------{R}")
+        print(f"{S}  ---------------------------------------------------------{R}")
+        print()
         sys.stdout.flush()
 
-        # Store cursor position for banner updates (title line is 10 rows up)
         hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
         csbi = CONSOLE_SCREEN_BUFFER_INFO()
         if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
-            self._status_row = csbi.dwCursorPosition.Y - 10
+            self._status_row = csbi.dwCursorPosition.Y - 11
+            self._scroll_top = csbi.dwCursorPosition.Y
 
         self._create_listener_window()
         if not user32.RegisterHotKey(self._hwnd, HOTKEY_ID,

@@ -25,6 +25,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <time.h>
+#include <conio.h>
 
 #pragma comment(lib, "gdiplus")
 #pragma comment(lib, "ole32")
@@ -36,7 +37,7 @@
 #define HIDDEN_CLASS L"ClipSaveHiddenWnd"
 
 #define AUTHOR L"Igor Brzezek"
-#define VERSION L"0.4"
+#define VERSION L"0.5"
 #define GITHUB L"https://github.com/IgorBrzezek/ClipSave"
 
 
@@ -81,6 +82,13 @@ static int g_active = 1;
 static int g_color = 0;
 static int g_beep = 0;
 static SHORT g_status_row = -1;
+
+/* ── Scrollable file list ────────────────────────────────── */
+
+#define MAX_ENTRIES 4096
+static WCHAR* entries[MAX_ENTRIES];
+static int entry_count = 0;
+static int scroll_pos = 0;
 
 /* ── Hotkey configuration ─────────────────────────────────── */
 
@@ -391,6 +399,7 @@ static void make_filename(WCHAR* out, size_t out_sz, const WCHAR* fmt, const WCH
 
 /* ── Clipboard event handler ───────────────────────────────── */
 
+static void redraw_entries(void);
 static UINT64 last_hash = 0;
 
 static void on_clipboard(void) {
@@ -442,6 +451,27 @@ static void on_clipboard(void) {
     /* Deduplication */
     UINT64 hval = image_hash(src_bmp);
     if (hval == last_hash && last_hash != 0) {
+        if (g_beep) Beep(600, 200);
+        WCHAR dup_path[MAX_PATH];
+        make_filename(dup_path, MAX_PATH, local_fmt, local_name);
+        const WCHAR* dup_base = wcsrchr(dup_path, L'\\');
+        dup_base = dup_base ? dup_base + 1 : dup_path;
+        WCHAR dup_line[512];
+        swprintf(dup_line, 512, L"  %s[%d] %s%s  [already saved]",
+            g_color ? L"\x1b[33m" : L"",
+            counter + 1, dup_base,
+            g_color ? L"\x1b[0m" : L"");
+        if (entry_count < MAX_ENTRIES) {
+            size_t len = wcslen(dup_line);
+            entries[entry_count] = (WCHAR*)malloc((len + 1) * sizeof(WCHAR));
+            if (entries[entry_count]) {
+                wcscpy_s(entries[entry_count], len + 1, dup_line);
+                entry_count++;
+            }
+        }
+        scroll_pos = 0;
+        redraw_entries();
+        fflush(stdout);
         GdipDisposeImage((GpImage*)src_bmp);
         if (hbm) DeleteObject(hbm);
         return;
@@ -469,16 +499,25 @@ static void on_clipboard(void) {
             const WCHAR* base = wcsrchr(path, L'\\');
             base = base ? base + 1 : path;
             if (g_beep) Beep(400, 600);
-            wprintf(L"  [?] File exists: %s. Overwrite? [y/N] ", base);
-            fflush(stdout);
-            WCHAR ans[16];
-            if (fgetws(ans, 16, stdin)) {
-                if (ans[0] != L'y' && ans[0] != L'Y') {
-                    wprintf(L"  [-] Skipped.\n");
-                    GdipDisposeImage((GpImage*)final_img);
-                    if (hbm) DeleteObject(hbm);
-                    return;
-                }
+            {
+                HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+                CONSOLE_SCREEN_BUFFER_INFO ci;
+                GetConsoleScreenBufferInfo(h, &ci);
+                COORD pp = {0, ci.dwCursorPosition.Y};
+                SetConsoleCursorPosition(h, pp);
+                DWORD nn;
+                FillConsoleOutputCharacterW(h, L' ', ci.dwSize.X, pp, &nn);
+                WCHAR pbuf[520];
+                swprintf(pbuf, 520, L"  [?] File exists: %s. Overwrite? [y/N] ", base);
+                WriteConsoleW(h, pbuf, (DWORD)wcslen(pbuf), &nn, NULL);
+            }
+            int _ch = _getwch();
+            if (_ch != L'y' && _ch != L'Y') {
+                GdipDisposeImage((GpImage*)final_img);
+                if (hbm) DeleteObject(hbm);
+                redraw_entries();
+                fflush(stdout);
+                return;
             }
         }
     }
@@ -508,22 +547,32 @@ static void on_clipboard(void) {
     const WCHAR* base = wcsrchr(path, L'\\');
     base = base ? base + 1 : path;
 
+    WCHAR line[512];
     if (sz < 1048576)
-        wprintf(L"  [+] %s[%d] %s%s  [%ux%u px, %.1f KB]\n",
+        swprintf(line, 512, L"  [+] %s[%d] %s%s  [%ux%u px, %.1f KB]",
             g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
                        wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
-            counter,
-            base,
+            counter, base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1024.0);
     else
-        wprintf(L"  [+] %s[%d] %s%s  [%ux%u px, %.1f MB]\n",
+        swprintf(line, 512, L"  [+] %s[%d] %s%s  [%ux%u px, %.1f MB]",
             g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
                        wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
-            counter,
-            base,
+            counter, base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1048576.0);
+
+    if (entry_count < MAX_ENTRIES) {
+        size_t len = wcslen(line);
+        entries[entry_count] = (WCHAR*)malloc((len + 1) * sizeof(WCHAR));
+        if (entries[entry_count]) {
+            wcscpy_s(entries[entry_count], len + 1, line);
+            entry_count++;
+        }
+    }
+    scroll_pos = 0;
+    redraw_entries();
     fflush(stdout);
 
     GdipDisposeImage((GpImage*)final_img);
@@ -589,6 +638,16 @@ static void message_loop(void) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        while (_kbhit()) {
+            int ch = _getch();
+            if (ch == 0xE0 || ch == 0) {
+                ch = _getch();
+                if (ch == 72 && scroll_pos < entry_count) scroll_pos++;
+                else if (ch == 80 && scroll_pos > 0) scroll_pos--;
+                else continue;
+                redraw_entries();
+            }
+        }
         Sleep(50);
     }
 }
@@ -625,6 +684,46 @@ static int create_listener_window(void) {
     return 1;
 }
 
+/* ── Screen / scroll management ──────────────────────────── */
+
+static void clear_screen(void) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    COORD top = {0, 0};
+    DWORD n;
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    GetConsoleScreenBufferInfo(h, &csbi);
+    FillConsoleOutputCharacterW(h, L' ', csbi.dwSize.X * csbi.dwSize.Y, top, &n);
+    SetConsoleCursorPosition(h, top);
+}
+
+#define HEADER_ROWS 12  /* 11 header lines + 1 blank */
+
+static void redraw_entries(void) {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    GetConsoleScreenBufferInfo(h, &csbi);
+    int visible = csbi.srWindow.Bottom - HEADER_ROWS + 1;
+    if (visible < 1) visible = 1;
+    int max_s = entry_count - visible;
+    if (max_s < 0) max_s = 0;
+    if (scroll_pos > max_s) scroll_pos = max_s;
+    int start = entry_count - visible - scroll_pos;
+    if (start < 0) start = 0;
+
+    SHORT w = csbi.dwSize.X;
+    DWORD n;
+    COORD pos = {0, (SHORT)HEADER_ROWS};
+    for (int i = 0; i < visible; i++) {
+        FillConsoleOutputCharacterW(h, L' ', w, pos, &n);
+        SetConsoleCursorPosition(h, pos);
+        int idx = start + i;
+        if (idx >= 0 && idx < entry_count) {
+            WriteConsoleW(h, entries[idx], (DWORD)wcslen(entries[idx]), &n, NULL);
+        }
+        pos.Y++;
+    }
+}
+
 /* ── Startup display ─────────────────────────────────────────────── */
 
 static void print_banner(void) {
@@ -647,7 +746,6 @@ static void print_banner(void) {
             SetConsoleMode(hCon, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     }
 
-    wprintf(L"\n");
     wprintf(L"  %s=================================================================\n",
         g_color ? L"\x1b[90m" : L"");
     if (g_color) {
@@ -920,7 +1018,9 @@ int wmain(int argc, WCHAR* argv[]) {
     gdiplus_init();
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
     CreateDirectoryW(cfg.directory, NULL);
+    clear_screen();
     print_banner();
+    wprintf(L"\n");  /* blank line between header and file list */
 
     if (!create_listener_window()) {
         gdiplus_shutdown();
