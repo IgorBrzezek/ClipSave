@@ -1,0 +1,90 @@
+ClipSave changelog
+==================
+
+v0.9 (2026-09-12)
+-----------------
+WebM (VP9 video) output is replaced with WebP (still image).
+
+Why
+  v0.8 saved clipboard copies as single-frame WebM (VP9 in a Matroska
+  container).  Many image viewers and browsers refuse to render frames
+  from a video container, and the exe silently did nothing if the
+  libvpx runtime DLLs were missing.  Clipboard images are stills, so
+  the natural format is WebP: real image compression (lossy VP8 or
+  lossless VP8L) and universal viewer/browser support as a plain image.
+
+Changes
+  - `-f webm` is now `-f webp`; WebP files open in any viewer/browser.
+  - `--webmq N` (1-10) is now `--webpq N` (1-100, JPEG-like scale,
+    default 80); `--webmlossless` now selects lossless VP8L.
+  - `webm_save.c` (VP9 encoder + Matroska muxer, libvpx) replaced by
+    `webp_save.c` (libwebp wrapper: WebPEncodeRGB / 
+    WebPEncodeLosslessRGB, RIFF/WEBP written directly to disk).
+  - libwebp is linked statically -> the exe is a single standalone
+    binary with NO codec DLLs at runtime (libvpx-1.dll,
+    libwinpthread-1.dll are no longer shipped).
+  - The Python version (clipsave.py) now supports the same WebP output:
+    `-f webp`, `--webpq N` (1-100, default 80) and `--webplossless`,
+    via Pillow's built-in libwebp (lossy VP8 / lossless VP8L).
+    SCRIPT_VERSION raised to 0.9 (feature parity with the C version).
+  - Updated help, banner, README and build scripts (build_final.sh,
+    build_linux.sh) accordingly.
+
+Build
+  Static libwebp 1.4.0 is built from source via build_webp_lib.sh
+  (CMake, printers/tools disabled); link with -lwebp -lsharpyuv -lm.
+
+Testing
+  Verified on Windows 10 (build 19045): all four WebP variants encode
+  and decode OK (webp_pipe, 640x360).  Lossless output is pixel-exact
+  vs. the source 24-bit RGB frame (0 differing pixels); lossy q80 shows
+  normal artifacts (229128 differing pixels).  File sizes scale with
+  quality: q10=2.5 KB, q80=5.0 KB, q100=15.1 KB, lossless=1.2 KB.
+
+Version: 0.9
+
+v0.7 (2026-09-12)
+-----------------
+Release highlights: every Snipping Tool capture is now saved reliably and
+always from the same lossless pixel source.
+
+Reliable capture under transient clipboard states
+  WM_CLIPBOARDUPDATE is a posted message: it can be delivered while the
+  source application still owns the clipboard (OpenClipboard fails with
+  ERROR_ACCESSDENIED) or before delay-rendered image data is readable.
+  Previously the retry loop stopped as soon as a single OpenClipboard call
+  succeeded, so a capture was silently dropped whenever that one open
+  observed a transient, incomplete clipboard.
+
+  The whole open / check / read / close cycle now repeats across the entire
+  retry window (20 attempts x 50 ms), and the data read keeps retrying too
+  (3 x 150 ms) for delay-rendered formats.  This matches the behaviour
+  recommended for Win10/11 clipboard listeners.
+
+Native "PNG" format is preferred
+  Snipping Tool publishes its image as a registered "PNG" clipboard format
+  that carries the exact, lossless pixels.  When that format is advertised,
+  ClipSave now waits for and reads the PNG and uses the DIB/BITMAP decode
+  only as a fallback for sources that never publish PNG.  As a result a
+  capture always looks the same, instead of sometimes being a lossy and
+  potentially misplaced DIB reconstruction.
+
+DIB pixel-offset fix (CF_DIBV5 / BITMAPV4HEADER / BITMAPV5HEADER)
+  BI_BITFIELDS color masks are placed immediately after the header only for
+  the legacy 40-byte BITMAPINFOHEADER.  In BITMAPV4HEADER / BITMAPV5HEADER
+  (used by CF_DIBV5, which Snipping Tool publishes) the masks are embedded
+  inside the header itself.  The old pixel-offset calculation added 3 DWORDs
+  unconditionally, shifting the pixel bits by 12 bytes (or failing the read)
+  whenever the DIB fallback processed a V4/V5 BI_BITFIELDS bitmap.  The extra
+  offset is now applied only when biSize == sizeof(BITMAPINFOHEADER).
+
+Testing
+  Verified on Windows 10 (build 19045) with a synthetic clipboard producer:
+  - normal copies exposing PNG + CF_DIBV5 + CF_DIB (five different images) -
+    pixel-identical saves each time;
+  - DIB-only sources (exact and intentionally trailing-padded CF_DIBV5
+    BI_BITFIELDS) - correct pixels; the 0.6 build misplaces the padded case;
+  - delay-rendered PNG source (700 ms render latency, PNG advertised before
+    data is ready) - final save comes from the lossless PNG, as intended.
+
+Version: 0.7

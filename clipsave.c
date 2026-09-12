@@ -5,10 +5,11 @@
  * Requires: Windows 10/11, GDI+ (built-in).
  *
  * Author:   Igor Brzeżek
- * Version:  0.3
+ * Version:  0.9
  * GitHub:   https://github.com/IgorBrzezek/ClipSave
  *
- * Build:  gcc -O2 -municode clipsave.c -lgdiplus -lgdi32 -lole32 -luuid -o clipsave.exe
+ * Build:  gcc -O2 -municode clipsave.c webp_save.c -lgdiplus -lgdi32 \
+ *             -lole32 -luuid -lwebp -lsharpyuv -lpthread -lm -o clipsave.exe
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -19,6 +20,7 @@
 #endif
 #include <WinCon.h>
 #include <objidl.h>
+#include <objbase.h>
 #include <gdiplus.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,10 +28,13 @@
 #include <wchar.h>
 #include <time.h>
 #include <conio.h>
+#include "webp_save.h"
 
 #pragma comment(lib, "gdiplus")
 #pragma comment(lib, "ole32")
 #pragma comment(lib, "uuid")
+#pragma comment(lib, "webp")
+#pragma comment(lib, "sharpyuv")
 
 /* ── Constants ─────────────────────────────────────────────── */
 
@@ -37,7 +42,7 @@
 #define HIDDEN_CLASS L"ClipSaveHiddenWnd"
 
 #define AUTHOR L"Igor Brzezek"
-#define VERSION L"0.5"
+#define VERSION L"0.9"
 #define GITHUB L"https://github.com/IgorBrzezek/ClipSave"
 
 
@@ -66,15 +71,19 @@ typedef struct {
     WCHAR  name_mode[128];
     int    overwrite;
     int    compression;
+    int    webp_quality;     /* 1..100, only used when fmt == webp       */
+    int    webp_lossless;    /* non-zero => WebP lossless (VP8L)          */
 } Config;
 
 static Config cfg = {
     L".",
     L"png",
-    16,
+    24,
     L"DATETIME",
     0,
     -1,
+    WEBP_DEFAULT_QUALITY,
+    0,
 };
 
 #define HOTKEY_ID 1
@@ -330,6 +339,43 @@ static int save_image(GpBitmap* img, const WCHAR* path, const WCHAR* fmt) {
     return (st == Ok);
 }
 
+/* ── Save as WebP (image) ───────────────────────────────────────── */
+
+/* Locks the 24bpp GDI+ bitmap (memory order B,G,R, padded stride) and
+   hands a tightly packed top-down R,G,B buffer to the WebP encoder. */
+static int save_webp_path(GpBitmap* img, const WCHAR* path) {
+    UINT w, h;
+    if (GdipGetImageWidth((GpImage*)img, &w) != Ok) return 0;
+    if (GdipGetImageHeight((GpImage*)img, &h) != Ok) return 0;
+
+    GpRect r = { 0, 0, (int)w, (int)h };
+    BitmapData d;
+    if (GdipBitmapLockBits(img, &r, ImageLockModeRead,
+                           PixelFormat24bppRGB, &d) != Ok)
+        return 0;
+
+    BYTE* sp = (BYTE*)d.Scan0;
+    int stride = d.Stride;
+    BYTE* rgb = (BYTE*)malloc((size_t)w * h * 3);
+    int ok = 0;
+    if (rgb) {
+        for (UINT y = 0; y < h; y++) {
+            BYTE* src = sp + (size_t)y * stride;
+            BYTE* dst = rgb + (size_t)y * w * 3;
+            for (UINT x = 0; x < w; x++) {
+                dst[x * 3 + 0] = src[x * 3 + 2];
+                dst[x * 3 + 1] = src[x * 3 + 1];
+                dst[x * 3 + 2] = src[x * 3 + 0];
+            }
+        }
+        ok = save_webp(path, rgb, (int)w, (int)h,
+                       cfg.webp_quality, cfg.webp_lossless);
+        free(rgb);
+    }
+    GdipBitmapUnlockBits(img, &d);
+    return ok;
+}
+
 /* ── Filename generation ──────────────────────────────────── */
 
 static int counter = 0;
@@ -400,7 +446,252 @@ static void make_filename(WCHAR* out, size_t out_sz, const WCHAR* fmt, const WCH
 /* ── Clipboard event handler ───────────────────────────────── */
 
 static void redraw_entries(void);
-static UINT64 last_hash = 0;
+
+/* ── Saved-image history for duplicate suppression ───────────── */
+/* Windows 11 / Snipping Tool re-publishes the same screenshot to the
+   clipboard twice (two WM_CLIPBOARDUPDATE messages with byte-identical
+   pixels, the second one arriving up to a few seconds later once Clipboard
+   History / delay rendering finishes).  The old code treated that echo as a
+   new event, printing a second "[already saved]" line for a single capture.
+   We now remember the images we actually saved and silently drop any
+   update that is byte-identical to one saved DUP_WINDOW_MS ago; the same
+   content copied again later is still reported, but with the *original*
+   file name and number. */
+
+#define DUP_HISTORY   32
+#define DUP_WINDOW_MS 5000
+
+typedef struct {
+    UINT64 hash;
+    int    number;              /* entry number printed in the [+] line */
+    WCHAR  basename[MAX_PATH];
+    DWORD  when;                /* GetTickCount() at save time          */
+} SavedImage;
+
+static SavedImage saved[ DUP_HISTORY ];
+static int saved_pos = 0;       /* ring write position                  */
+static int saved_n   = 0;       /* number of records stored (<= DUP_HISTORY) */
+
+static void note_saved(UINT64 hash, const WCHAR* basename, int number) {
+    saved[saved_pos].hash = hash;
+    saved[saved_pos].number = number;
+    wcscpy_s(saved[saved_pos].basename, MAX_PATH, basename);
+    saved[saved_pos].when = GetTickCount();
+    saved_pos = (saved_pos + 1) % DUP_HISTORY;
+    if (saved_n < DUP_HISTORY) saved_n++;
+}
+
+/* Returns:
+ *   0 - genuinely new image, proceed to save.
+ *   1 - identical image saved DUP_WINDOW_MS ago: this is the delayed
+ *       Windows 11 echo of the capture just saved -> drop silently.
+ *   2 - identical content copied again later: report it as an
+ *       "[already saved]" line, with *found_number / *found_basename
+ *       pointing at the real file that holds the same pixels.        */
+static int check_duplicate(UINT64 hval, int* found_number, WCHAR* found_basename) {
+    DWORD now = GetTickCount();
+    for (int i = 0; i < saved_n; i++) {
+        if (saved[i].hash == hval) {
+            if ((DWORD)(now - saved[i].when) < DUP_WINDOW_MS)
+                return 1;
+            *found_number = saved[i].number;
+            wcscpy_s(found_basename, MAX_PATH, saved[i].basename);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/* ── Robust clipboard reading ──────────────────────────────── */
+/* WM_CLIPBOARDUPDATE is *posted* (delivered asynchronously), at a moment
+   the source application may still hold the clipboard open - so a
+   listener often cannot open it (ERROR_ACCESSDENIED) - and delay-rendered
+   image data may not be ready yet.  Retry instead of giving up on the
+   first try; this is what makes Snipping Tool / Win+Shift+S / Ctrl+Shift+S
+   captures reliable.
+
+   Windows 11 also adds an observer race: Clipboard History (cbdhsvc),
+   Cloud Clipboard and other listeners re-open the clipboard right after
+   the source closes, so the format set can be observed in a transient,
+   partial state.  Therefore the whole open/check/read/close cycle is
+   repeated across the retry window (not just OpenClipboard).
+
+   The registered "PNG" format is Snipping Tool's native, lossless
+   representation and is always preferred; it never goes through the lossy
+   DIB synthesis path (BI_BITFIELDS masks are misplaced when CF_DIB is
+   synthesized from a CF_DIBV5 bitmap).  The DIB/BITMAP read is kept only
+   as a last resort for sources that never publish PNG. */
+
+#define CLIP_OPEN_RETRIES  20      /* max OpenClipboard attempts        */
+#define CLIP_OPEN_SLEEP_MS 50      /* ms between OpenClipboard attempts */
+#define CLIP_DATA_ATTEMPTS 3       /* max data-read attempts per open  */
+#define CLIP_DATA_SLEEP_MS 150     /* ms between data-read attempts     */
+
+static UINT g_png_format = 0;
+
+/* Offset (bytes) from the start of a packed DIB to its pixel bits. */
+static DWORD dib_pixel_offset(const BITMAPINFOHEADER* bih) {
+    DWORD off = bih->biSize;
+    /* Only a legacy BITMAPINFOHEADER (biSize == 40) stores the BI_BITFIELDS
+       color masks *after* the header.  In a BITMAPV4HEADER / BITMAPV5HEADER
+       (used by CF_DIBV5, which Snipping Tool publishes) the masks are
+       embedded inside the header itself, so nothing extra is appended.
+       Adding 3 DWORDs unconditionally shifted the pixel bits by 12 bytes
+       and produced a misplaced image whenever the DIB/BITMAP fallback was
+       used on a V4/V5 BI_BITFIELDS bitmap. */
+    if (bih->biSize == sizeof(BITMAPINFOHEADER) &&
+        bih->biBitCount > 8 && bih->biCompression == BI_BITFIELDS)
+        off += 3 * sizeof(DWORD);
+    if (bih->biClrUsed > 0)
+        off += bih->biClrUsed * (DWORD)sizeof(RGBQUAD);
+    else if (bih->biBitCount <= 8)
+        off += ((DWORD)1 << bih->biBitCount) * (DWORD)sizeof(RGBQUAD);
+    return off;
+}
+
+/* Convert a packed DIB block (CF_DIB / CF_DIBV5) into a GpBitmap. */
+static GpBitmap* gdip_from_packed_dib(const BYTE* dib, SIZE_T dib_size) {
+    const BITMAPINFO* bmi = (const BITMAPINFO*)dib;
+    GpBitmap* out = NULL;
+    HBITMAP hbm = NULL;
+    void* bits = NULL;
+    HDC hdc;
+    DWORD off;
+    UINT w, h;
+    size_t pitch, need;
+
+    if (dib_size < sizeof(BITMAPINFOHEADER)) return NULL;
+    if (bmi->bmiHeader.biWidth <= 0 || bmi->bmiHeader.biHeight == 0) return NULL;
+    if (bmi->bmiHeader.biPlanes != 1) return NULL;
+    if (bmi->bmiHeader.biCompression != BI_RGB &&
+        bmi->bmiHeader.biCompression != BI_BITFIELDS)
+        return NULL;   /* RLE / JPEG / PNG packed DIBs are not supported */
+
+    w = (UINT)bmi->bmiHeader.biWidth;
+    h = (UINT)labs(bmi->bmiHeader.biHeight);
+    off = dib_pixel_offset(&bmi->bmiHeader);
+    pitch = ((w * bmi->bmiHeader.biBitCount + 31) / 32) * 4;
+    if (pitch == 0) return NULL;
+    need = (size_t)off + pitch * h;
+    if (need > dib_size) return NULL;   /* truncated clipboard data */
+
+    hdc = GetDC(NULL);
+    hbm = CreateDIBSection(hdc, bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hbm && bits) {
+        memcpy(bits, dib + off, pitch * h);
+        GdipCreateBitmapFromHBITMAP(hbm, NULL, &out);
+    }
+    ReleaseDC(NULL, hdc);
+    if (hbm) DeleteObject(hbm);
+    return out;
+}
+
+/* Decode the registered "PNG" clipboard format into a self-contained
+   GpBitmap (the stream is freed here; later GDI+ use is stream-free). */
+static GpBitmap* gdip_from_clip_png(void) {
+    HANDLE h;
+    SIZE_T sz;
+    void* data;
+    HGLOBAL own = NULL;
+    IStream* stream = NULL;
+    GpBitmap* decoded = NULL;
+    GpBitmap* out = NULL;
+
+    if (!g_png_format) return NULL;
+    h = GetClipboardData(g_png_format);
+    if (!h) return NULL;
+
+    data = GlobalLock(h);
+    if (!data) return NULL;
+    sz = GlobalSize(h);
+    if (sz < 8 || sz > (SIZE_T)64 * 1024 * 1024) { GlobalUnlock(h); return NULL; }
+
+    own = GlobalAlloc(GMEM_MOVEABLE, sz);
+    if (own) {
+        void* dst = GlobalLock(own);
+        if (dst) {
+            memcpy(dst, data, sz);
+            GlobalUnlock(own);
+        } else {
+            GlobalFree(own);
+            own = NULL;
+        }
+    }
+    GlobalUnlock(h);
+    if (!own) return NULL;
+
+    /* The stream takes ownership of our private copy, so the stream can
+       be destroyed here after we copy the decoded pixels into a fresh
+       bitmap ("Bitmap and Image constructor dependencies", KB 814675). */
+    if (CreateStreamOnHGlobal(own, TRUE, &stream) == S_OK) {
+        if (GdipCreateBitmapFromStream((IStream*)stream, &decoded) == Ok) {
+            UINT w = 0, hgt = 0;
+            GdipGetImageWidth((GpImage*)decoded, &w);
+            GdipGetImageHeight((GpImage*)decoded, &hgt);
+            if (w > 0 && hgt > 0 &&
+                GdipCreateBitmapFromScan0(w, hgt, 0, PixelFormat32bppARGB, NULL, &out) == Ok) {
+                GpGraphics* g = NULL;
+                if (GdipGetImageGraphicsContext((GpImage*)out, &g) == Ok) {
+                    GdipDrawImageRectRectI(g, (GpImage*)decoded,
+                        0, 0, (INT)w, (INT)hgt,
+                        0, 0, (INT)w, (INT)hgt,
+                        UnitPixel, NULL, NULL, NULL);
+                    GdipDeleteGraphics(g);
+                }
+            }
+            GdipDisposeImage((GpImage*)decoded);
+        }
+        stream->lpVtbl->Release(stream);
+    }
+    return out;
+}
+
+/* Returns 1 if the (open) clipboard holds any image-like format. */
+static int clipboard_has_image_format(void) {
+    UINT fmt = 0;
+    while ((fmt = EnumClipboardFormats(fmt)) != 0) {
+        if (fmt == CF_BITMAP || fmt == CF_DIB || fmt == CF_DIBV5 ||
+            (g_png_format && fmt == g_png_format))
+            return 1;
+    }
+    return 0;
+}
+
+/* Read the image from the (open) clipboard.  Tries the registered PNG
+   format first (native Snipping Tool / browser format, avoids lossy DIB
+   synthesis), then CF_DIBV5 / CF_DIB with correct pixel-offset handling,
+   then CF_BITMAP. */
+static GpBitmap* clipboard_image_from_open_clipboard(void) {
+    GpBitmap* out;
+    HANDLE h;
+    void* data;
+    SIZE_T sz;
+
+    out = gdip_from_clip_png();
+    if (out) return out;
+
+    h = GetClipboardData(CF_DIBV5);
+    if (!h) h = GetClipboardData(CF_DIB);
+    if (h) {
+        data = GlobalLock(h);
+        if (data) {
+            sz = GlobalSize(h);
+            out = gdip_from_packed_dib((const BYTE*)data, sz);
+            GlobalUnlock(h);
+            if (out) return out;
+        }
+    }
+
+    {
+        HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP);
+        if (hbm) {
+            GpBitmap* b = NULL;
+            if (GdipCreateBitmapFromHBITMAP(hbm, NULL, &b) == Ok && b)
+                return b;
+        }
+    }
+    return NULL;
+}
 
 static void on_clipboard(void) {
     if (!g_active) return;
@@ -411,55 +702,84 @@ static void on_clipboard(void) {
     wcscpy_s(local_fmt, 8, cfg.fmt);
     wcscpy_s(local_name, 128, cfg.name_mode);
 
-    if (!OpenClipboard(NULL)) return;
+    if (!g_png_format)
+        g_png_format = RegisterClipboardFormatW(L"PNG");
 
-    HANDLE h = GetClipboardData(CF_DIB);
-    if (!h) { CloseClipboard(); return; }
+    /* The WM_CLIPBOARDUPDATE notification is *posted* and can be delivered
+       before the source application has closed the clipboard (OpenClipboard
+       fails with ERROR_ACCESSDENIED) or while the format set is still being
+       populated.  The whole open/check/read/close cycle is therefore repeated
+       across the entire retry window; the previous code gave up as soon as a
+       single OpenClipboard call had succeeded, silently dropping Snipping
+       Tool captures whenever that "first successful open" saw the clipboard
+       in a transient, incomplete state.
 
-    BITMAPINFO* bmi = (BITMAPINFO*)GlobalLock(h);
-    if (!bmi) { CloseClipboard(); return; }
-
-    HBITMAP hbm = NULL;
-    GpBitmap* src_bmp = NULL;
-    UINT w = bmi->bmiHeader.biWidth;
-    UINT h_ = abs(bmi->bmiHeader.biHeight);
-
-    if (bmi->bmiHeader.biSize >= sizeof(BITMAPINFOHEADER)) {
-        HDC hdc = GetDC(NULL);
-        void* bits = NULL;
-        hbm = CreateDIBSection(hdc, bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-        if (hbm && bits) {
-            BYTE* src_pixels = (BYTE*)bmi + bmi->bmiHeader.biSize;
-            if (bmi->bmiHeader.biBitCount <= 8) {
-                src_pixels += (1 << bmi->bmiHeader.biBitCount) * sizeof(RGBQUAD);
-            }
-            size_t pitch = ((w * bmi->bmiHeader.biBitCount + 31) / 32) * 4;
-            memcpy(bits, src_pixels, pitch * h_);
-            GdipCreateBitmapFromHBITMAP(hbm, NULL, &src_bmp);
+       The native registered "PNG" format is preferred: it is Snipping Tool's
+       exact, lossless pixels.  We keep waiting for it for as long as it is
+       advertised (so capture always looks the same), while a synthesized
+       DIB/BITMAP read is used only for sources that never publish PNG. */
+    GpBitmap* src_bmp = NULL;      /* native PNG image (preferred)            */
+    GpBitmap* fallback = NULL;     /* DIB/BITMAP image (used only if no PNG)  */
+    int png_advertised = 0;
+    int attempt;
+    for (attempt = 0; attempt < CLIP_OPEN_RETRIES; attempt++) {
+        if (!OpenClipboard(NULL)) {
+            Sleep(CLIP_OPEN_SLEEP_MS);
+            continue;
         }
-        ReleaseDC(NULL, hdc);
+        if (g_png_format && IsClipboardFormatAvailable(g_png_format))
+            png_advertised = 1;
+        if (clipboard_has_image_format()) {
+            int r;
+            for (r = 0; r < CLIP_DATA_ATTEMPTS && !src_bmp; r++) {
+                src_bmp = gdip_from_clip_png();
+                if (!src_bmp && !fallback)
+                    fallback = clipboard_image_from_open_clipboard();
+                if (src_bmp)
+                    break;
+                if (!fallback) {
+                    Sleep(CLIP_DATA_SLEEP_MS);   /* delay-rendered data */
+                    continue;
+                }
+                break;   /* have a fallback, keep waiting for PNG next open */
+            }
+        }
+        CloseClipboard();
+        if (src_bmp)
+            break;
+        if (fallback && !png_advertised)
+            break;       /* PNG can never arrive - use the DIB/BITMAP now  */
+        Sleep(CLIP_OPEN_SLEEP_MS);
     }
 
-    GlobalUnlock(h);
-    CloseClipboard();
-
-    if (!src_bmp) {
-        if (hbm) DeleteObject(hbm);
-        return;
+    if (src_bmp) {
+        if (fallback) GdipDisposeImage((GpImage*)fallback);
+    } else {
+        src_bmp = fallback;
     }
+    if (!src_bmp) return;
 
     /* Deduplication */
     UINT64 hval = image_hash(src_bmp);
-    if (hval == last_hash && last_hash != 0) {
+    int dup_number = 0;
+    WCHAR dup_base[MAX_PATH];
+    int dup = check_duplicate(hval, &dup_number, dup_base);
+
+    if (dup == 1) {
+        /* Same pixels republished within DUP_WINDOW_MS - the Windows 11
+           echo of the capture we just saved.  Stay silent so a single
+           screenshot produces a single list entry. */
+        GdipDisposeImage((GpImage*)src_bmp);
+        return;
+    }
+    if (dup == 2) {
+        /* Identical content copied again (or a very late echo): report it,
+           naming the real file that was saved before. */
         if (g_beep) Beep(600, 200);
-        WCHAR dup_path[MAX_PATH];
-        make_filename(dup_path, MAX_PATH, local_fmt, local_name);
-        const WCHAR* dup_base = wcsrchr(dup_path, L'\\');
-        dup_base = dup_base ? dup_base + 1 : dup_path;
         WCHAR dup_line[512];
         swprintf(dup_line, 512, L"  %s[%d] %s%s  [already saved]",
             g_color ? L"\x1b[33m" : L"",
-            counter + 1, dup_base,
+            dup_number, dup_base,
             g_color ? L"\x1b[0m" : L"");
         if (entry_count < MAX_ENTRIES) {
             size_t len = wcslen(dup_line);
@@ -473,17 +793,14 @@ static void on_clipboard(void) {
         redraw_entries();
         fflush(stdout);
         GdipDisposeImage((GpImage*)src_bmp);
-        if (hbm) DeleteObject(hbm);
         return;
     }
-    last_hash = hval;
 
     /* Apply color depth */
     GpBitmap* final_img = apply_bpp(src_bmp);
     GdipDisposeImage((GpImage*)src_bmp);
 
     if (!final_img) {
-        if (hbm) DeleteObject(hbm);
         return;
     }
 
@@ -514,7 +831,6 @@ static void on_clipboard(void) {
             int _ch = _getwch();
             if (_ch != L'y' && _ch != L'Y') {
                 GdipDisposeImage((GpImage*)final_img);
-                if (hbm) DeleteObject(hbm);
                 redraw_entries();
                 fflush(stdout);
                 return;
@@ -523,14 +839,18 @@ static void on_clipboard(void) {
     }
 
     /* Save */
-    if (!save_image(final_img, path, local_fmt)) {
-        if (g_color)
-            wprintf(L"  \x1b[31m[!] Save error: %s - WRITE ERROR!\x1b[0m\n", path);
-        else
-            wprintf(L"  [!] Save error: %s\n", path);
-        GdipDisposeImage((GpImage*)final_img);
-        if (hbm) DeleteObject(hbm);
-        return;
+    {
+        int is_webp = (wcscmp(local_fmt, L"webp") == 0);
+        int saved = is_webp ? save_webp_path(final_img, path)
+                            : save_image(final_img, path, local_fmt);
+        if (!saved) {
+            if (g_color)
+                wprintf(L"  \x1b[31m[!] Save error: %s - WRITE ERROR!\x1b[0m\n", path);
+            else
+                wprintf(L"  [!] Save error: %s\n", path);
+            GdipDisposeImage((GpImage*)final_img);
+            return;
+        }
     }
 
     counter++;
@@ -547,18 +867,22 @@ static void on_clipboard(void) {
     const WCHAR* base = wcsrchr(path, L'\\');
     base = base ? base + 1 : path;
 
+    note_saved(hval, base, counter);
+
     WCHAR line[512];
     if (sz < 1048576)
         swprintf(line, 512, L"  [+] %s[%d] %s%s  [%ux%u px, %.1f KB]",
             g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
-                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" :
+                       wcscmp(local_fmt, L"webp") == 0 ? L"\x1b[32m" : L"\x1b[33m") : L"",
             counter, base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1024.0);
     else
         swprintf(line, 512, L"  [+] %s[%d] %s%s  [%ux%u px, %.1f MB]",
             g_color ? (wcscmp(local_fmt, L"jpg") == 0 ? L"\x1b[35m" :
-                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" : L"\x1b[33m") : L"",
+                       wcscmp(local_fmt, L"png") == 0 ? L"\x1b[36m" :
+                       wcscmp(local_fmt, L"webp") == 0 ? L"\x1b[32m" : L"\x1b[33m") : L"",
             counter, base,
             g_color ? L"\x1b[0m" : L"",
             img_w, img_h, sz / 1048576.0);
@@ -576,7 +900,6 @@ static void on_clipboard(void) {
     fflush(stdout);
 
     GdipDisposeImage((GpImage*)final_img);
-    if (hbm) DeleteObject(hbm);
 }
 
 /* ── Window procedure ─────────────────────────────────────── */
@@ -779,6 +1102,15 @@ static void print_banner(void) {
     wprintf(L"   %sBPP%s: ", g_color ? L"\x1b[33m" : L"", g_color ? L"\x1b[0m" : L"");
     if (cfg.bpp == 'P') wprintf(L"P"); else wprintf(L"%d", cfg.bpp);
     wprintf(L" (%s)\n", bpp_str);
+    if (wcscmp(cfg.fmt, L"webp") == 0) {
+        wprintf(L"  %sWebP%s    : %s%d%s %s\n",
+            g_color ? L"\x1b[33m" : L"",
+            g_color ? L"\x1b[0m" : L"",
+            g_color ? L"\x1b[36m" : L"",
+            cfg.webp_quality,
+            g_color ? L"\x1b[0m" : L"",
+            cfg.webp_lossless ? L"lossless" : L"(lossy, 1=small .. 100=best)");
+    }
     wprintf(L"  %sNames%s     : %s%s%s\n",
         g_color ? L"\x1b[33m" : L"",
         g_color ? L"\x1b[0m" : L"",
@@ -883,17 +1215,21 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"ClipSave - Windows Clipboard Monitor  v%s\n\n", VERSION);
             wprintf(L"DESCRIPTION\n");
             wprintf(L"  Listens for clipboard image changes via AddClipboardFormatListener.\n");
-            wprintf(L"  Saves images as PNG/JPEG/BMP with optional color depth conversion.\n\n");
+            wprintf(L"  Saves images as PNG/JPEG/BMP/WebP with optional color depth conversion.\n\n");
             wprintf(L"USAGE\n");
             wprintf(L"  clipsave.exe [options]\n\n");
             wprintf(L"OPTIONS\n");
             wprintf(L"  -h               Short help\n");
             wprintf(L"  --help           This extended documentation\n");
             wprintf(L"  -d DIRECTORY     Target directory (default: .)\n");
-            wprintf(L"  -f FORMAT        png | jpg | bmp (default: png)\n");
+            wprintf(L"  -f FORMAT        png | jpg | bmp | webp (default: png)\n");
             wprintf(L"  -c N             JPG: quality 0-100 (default: 95)\n");
             wprintf(L"                   PNG: compression 1-10, 1=fast..10=slow (default: 6)\n");
-            wprintf(L"  --bpp N          Color depth: 8 | P | 16 | 24 (default: 16)\n");
+            wprintf(L"  --webpq N        WebP: quality 1-100 (default: 80)\n");
+            wprintf(L"                   1 = smallest file / worst quality,\n");
+            wprintf(L"                   100 = best quality / largest file\n");
+            wprintf(L"  --webplossless   WebP: lossless encoding (perfect pixels)\n");
+            wprintf(L"  --bpp N          Color depth: 8 | P | 16 | 24 (default: 24)\n");
             wprintf(L"                     8  - grayscale (mode L)\n");
             wprintf(L"                     P  - 8-bit palette, 256 colors (mode P)\n");
             wprintf(L"                     16 - RGB565 (5-6-5 bits per channel)\n");
@@ -914,6 +1250,8 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wprintf(L"  clipsave.exe -f bmp --bpp 8 --name scan[N]\n");
             wprintf(L"  clipsave.exe --name photo_[DT]_[NN]\n");
             wprintf(L"  clipsave.exe -f jpg -c 85\n");
+            wprintf(L"  clipsave.exe -f webp --webpq 75\n");
+            wprintf(L"  clipsave.exe -f webp --webplossless\n");
             wprintf(L"  clipsave.exe --keys CTRL-LEFTALT-F12\n\n");
             wprintf(L"STOPPING  Ctrl+C\n");
             wprintf(L"REQUIREMENTS  Windows 10/11\n");
@@ -922,13 +1260,15 @@ static void parse_args(int argc, WCHAR* argv[]) {
 
         if (wcscmp(arg, L"-h") == 0) {
             wprintf(L"ClipSave - capture images from Windows clipboard\n");
-            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--name MODE] [--overwrite] [--color] [--beep] [--keys MOD-MOD-KEY]\n");
+            wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--webpq N] [--webplossless] [--name MODE] [--overwrite] [--color] [--beep] [--keys MOD-MOD-KEY]\n");
             wprintf(L"  -h             This help\n");
             wprintf(L"  --help         Full documentation\n");
             wprintf(L"  -d DIR         Target directory (default: .)\n");
-            wprintf(L"  -f FORMAT      png | jpg | bmp (default: png)\n");
-            wprintf(L"  --bpp N        8 | P | 16 | 24 (default: 16)\n");
+            wprintf(L"  -f FORMAT      png | jpg | bmp | webp (default: png)\n");
+            wprintf(L"  --bpp N        8 | P | 16 | 24 (default: 24)\n");
             wprintf(L"  -c N           JPG: quality 0-100 / PNG: compression 1-10\n");
+            wprintf(L"  --webpq N      WebP: quality 1-100 (default: 80), 1=smallest..100=best\n");
+            wprintf(L"  --webplossless WebP: lossless (perfect pixels, larger file)\n");
             wprintf(L"  --name MODE    DATETIME | pattern with [N] [D] [T]\n");
             wprintf(L"  --overwrite    Overwrite without asking\n");
             wprintf(L"  --color        Colored terminal output\n");
@@ -943,13 +1283,24 @@ static void parse_args(int argc, WCHAR* argv[]) {
             wcscpy_s(cfg.directory, MAX_PATH, argv[i]);
         }
         else if (wcscmp(arg, L"-f") == 0) {
-            if (++i >= argc) die(L"-f requires argument FORMAT (png|jpg|bmp)");
+            if (++i >= argc) die(L"-f requires argument FORMAT (png|jpg|bmp|webp)");
             WCHAR* val = argv[i];
             _wcslwr_s(val, wcslen(val) + 1);
-            if (wcscmp(val, L"png") && wcscmp(val, L"jpg") && wcscmp(val, L"bmp"))
-                die(L"Unknown format. Allowed: png, jpg, bmp");
+            if (wcscmp(val, L"png") && wcscmp(val, L"jpg") &&
+                wcscmp(val, L"bmp") && wcscmp(val, L"webp"))
+                die(L"Unknown format. Allowed: png, jpg, bmp, webp");
             wcscpy_s(cfg.fmt, 8, val);
             _wcslwr_s(cfg.fmt, 8);
+        }
+        else if (wcscmp(arg, L"--webpq") == 0) {
+            if (++i >= argc) die(L"--webpq requires an argument N (1-100)");
+            int v = _wtoi(argv[i]);
+            if (v < WEBP_MIN_QUALITY || v > WEBP_MAX_QUALITY)
+                die(L"--webpq: allowed values: 1-100");
+            cfg.webp_quality = v;
+        }
+        else if (wcscmp(arg, L"--webplossless") == 0) {
+            cfg.webp_lossless = 1;
         }
         else if (wcscmp(arg, L"--bpp") == 0) {
             if (++i >= argc) die(L"--bpp requires an argument (8|P|16|24)");
@@ -1016,6 +1367,7 @@ int wmain(int argc, WCHAR* argv[]) {
     }
 
     gdiplus_init();
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
     CreateDirectoryW(cfg.directory, NULL);
     clear_screen();

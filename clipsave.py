@@ -10,7 +10,7 @@ Requirements: Python 3.7+, Pillow, Windows 10/11.
 """
 
 SCRIPT_AUTH = "Igor Brzeżek"
-SCRIPT_VERSION = 0.5
+SCRIPT_VERSION = 0.9
 SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 import sys
@@ -51,9 +51,11 @@ Usage:  python clipsave.py [-d DIRECTORY] [-f FORMAT] [--bpp N] [--name MODE]
   -h            This help (short)
   --help        Full documentation with examples
   -d DIRECTORY    Target save directory (default: .)
-  -f FORMAT     png | jpg | bmp  (default: png)
-  --bpp N       Color depth: 8 | 16 | 24 | P  (default: 16)
+  -f FORMAT     png | jpg | bmp | webp  (default: png)
+  --bpp N       Color depth: 8 | 16 | 24 | P  (default: 24)
   -c N          JPG: quality 0-100 / PNG: compression 1-10  (see --help)
+  --webpq N     WebP: quality 1-100 (default: 80)
+  --webplossless WebP: lossless encoding (perfect pixels)
   --name MODE   DATETIME | pattern with [N] [D] [T] (default: DATETIME)
   --overwrite   Overwrite existing files without asking
   --color       Colored terminal output (ANSI)
@@ -69,7 +71,7 @@ Toggle: configurable hotkey (default: Ctrl+Shift+F11, use --keys)
 
 LONG_HELP = """\
 ===================================================================
-           ClipSave - Windows Clipboard Monitor  v0.5
+           ClipSave - Windows Clipboard Monitor  v0.9
 ===================================================================
 
 DESCRIPTION
@@ -94,17 +96,26 @@ OPTIONS
                     png - lossless, default
                     jpg - lossy JPEG compression
                     bmp - Windows Bitmap, uncompressed
+                    webp - WebP image: lossy (VP8) or lossless (VP8L)
 
   -c N            Compression level:
                     JPG: quality 0-100 (default: 95)
                     PNG: level 1-10, where 1=fast/large..10=slow/small (default: 6)
+
+  --webpq N       WebP: quality 1-100 (default: 80).
+                    1 = smallest file / worst quality,
+                    100 = best quality / largest file.
+                    Lossy mode only; ignored with --webplossless.
+
+  --webplossless  WebP: lossless encoding (VP8L, perfect pixels).
+                    Larger file; ignores --webpq.
 
   --bpp N         Color depth (bits per pixel):
                      8  - grayscale (mode L)
                      16 - RGB565 reduction (5-6-5 bits per channel)
                      24 - full RGB color (3x8 bits)
                      P  - 8-bit palette, 256 colors (mode P)
-                   Default: 16.
+                   Default: 24.
 
   --name MODE     Naming scheme:
                     DATETIME   - clip_YYYYMMDD_HHMMSS_mmm.fmt
@@ -124,8 +135,8 @@ OPTIONS
                   Default: ask before overwriting.
 
   --color         Colored terminal output (ANSI).
-                  Banner, filenames (jpg=magenta, png=cyan, bmp=yellow)
-                  and errors are colorized.
+                  Banner, filenames (jpg=magenta, png=cyan, bmp=yellow,
+                  webp=green) and errors are colorized.
 
   --beep          Play a short beep on successful save and a long
                   beep when asking about overwriting an existing file.
@@ -149,13 +160,19 @@ TOGGLE
 
 EXAMPLES
   python clipsave.py
-      PNG, 16 bpp, current directory.
+      PNG, 24 bpp (full RGB), current directory.
 
   python clipsave.py -d C:\\Screenshots -f jpg --bpp 24
       Full-color JPEG to C:\\Screenshots.
 
   python clipsave.py -f bmp --bpp 8 --name scan[N]
       BMP grayscale, files: scan1.bmp, scan2.bmp...
+
+  python clipsave.py -f webp --webpq 75
+      Lossy WebP, 75% quality.
+
+  python clipsave.py -f webp --webplossless
+      Lossless WebP (perfect pixels).
 
 STOPPING
   Ctrl+C
@@ -438,7 +455,16 @@ class ClipSave:
     _LUT_G6 = [(v >> 2) << 2 for v in range(256)]
     _LUT_B5 = [(v >> 3) << 3 for v in range(256)]
 
+    # Windows 11 / Snipping Tool re-publishes the same screenshot twice
+    # (two WM_CLIPBOARDUPDATE messages, byte-identical pixels, the second
+    # one a few seconds later).  Remember the last DUP_HISTORY saved images
+    # and silently drop any update identical to one saved DUP_WINDOW_SECONDS
+    # ago, so a single capture produces a single list entry.
+    DUP_HISTORY = 32
+    DUP_WINDOW_SECONDS = 5.0
+
     def __init__(self, directory, fmt, bpp, name_mode, overwrite, compression,
+                 webp_quality=80, webp_lossless=False,
                  color=False, beep=False, keys_modifiers=None, keys_vk=None, keys_display=None):
         self.directory = Path(directory).resolve()
         self.fmt = fmt.lower()
@@ -451,8 +477,10 @@ class ClipSave:
             self.compression = max(0, min(9, compression - 1))
         else:
             self.compression = compression
+        self.webp_quality = webp_quality
+        self.webp_lossless = webp_lossless
         self.counter = 0
-        self._last_hash = None
+        self._dup_hist = []
         self._hwnd = None
         self._wndproc_ref = None  # prevent GC of the callback
         self.color = color
@@ -550,6 +578,40 @@ class ClipSave:
             h.update(raw[-4096:])
         return h.hexdigest()
 
+    def _note_saved(self, ihash, basename, number):
+        """Remember a file that was actually saved, for later dedup."""
+        self._dup_hist.append((ihash, number, basename, time.monotonic()))
+        if len(self._dup_hist) > self.DUP_HISTORY:
+            self._dup_hist.pop(0)
+
+    def _check_duplicate(self, ihash):
+        """Returns:
+           0          - genuinely new image, proceed to save.
+           (1, n/a...) - identical image saved recently (Windows 11 echo of
+                         the capture just saved) -> drop silently.
+           (2, number, basename) - identical content copied again later ->
+                         report "[already saved]" with the original file.  """
+        now = time.monotonic()
+        for h, number, basename, when in reversed(self._dup_hist):
+            if h != ihash:
+                continue
+            if now - when < self.DUP_WINDOW_SECONDS:
+                return (1, None, None)
+            return (2, number, basename)
+        return (0, None, None)
+
+    def _append_file_line(self, line):
+        """Add a line to the file list and redraw it (auto-scrolling)."""
+        self._file_lines.append(line)
+        if self._auto_scroll and self._scroll_top >= 0:
+            hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            csbi = CONSOLE_SCREEN_BUFFER_INFO()
+            if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
+                visible_rows = csbi.srWindow.Bottom - self._scroll_top + 1
+                if visible_rows > 0:
+                    self._scroll_offset = max(0, len(self._file_lines) - visible_rows)
+        self._redraw_file_list()
+
     # ── clipboard event handler ──────────────────────────────
 
     def _on_clipboard(self):
@@ -570,19 +632,18 @@ class ClipSave:
         except Exception:
             return
         ihash = self._image_hash(img)
-        if ihash == self._last_hash:
-            self._beep(600, 100)
-            self._file_lines.append(f"  [-] Duplicate data in clipboard")
-            if self._auto_scroll and self._scroll_top >= 0:
-                hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-                csbi = CONSOLE_SCREEN_BUFFER_INFO()
-                if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
-                    visible_rows = csbi.srWindow.Bottom - self._scroll_top + 1
-                    if visible_rows > 0:
-                        self._scroll_offset = max(0, len(self._file_lines) - visible_rows)
-            self._redraw_file_list()
+        dup, dup_num, dup_base = self._check_duplicate(ihash)
+        if dup == 1:
+            # Same pixels republished within DUP_WINDOW_SECONDS - the
+            # Windows 11 echo of the capture we just saved.  Stay silent
+            # so a single screenshot produces a single list entry.
             return
-        self._last_hash = ihash
+        if dup == 2:
+            # Identical content copied again (or a very late echo): report
+            # it, naming the real file that was saved before.
+            self._beep(600, 100)
+            self._append_file_line(f"  [-] [{dup_num}] {dup_base}  [already saved]")
+            return
 
         img = self._apply_bpp(img)
         fpath = self._make_filename()
@@ -609,6 +670,14 @@ class ClipSave:
                 save_kw["pnginfo"] = info
         elif self.fmt == "bmp":
             save_kw = {"format": "BMP"}
+        elif self.fmt == "webp":
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            save_kw = {"format": "WEBP"}
+            if self.webp_lossless:
+                save_kw["lossless"] = True
+            else:
+                save_kw["quality"] = self.webp_quality
 
         try:
             img.save(str(fpath), **save_kw)
@@ -620,6 +689,7 @@ class ClipSave:
             return
 
         self.counter += 1
+        self._note_saved(ihash, fpath.name, self.counter)
         w, h = img.size
         sz = fpath.stat().st_size
         if sz < 1_048_576:
@@ -627,20 +697,12 @@ class ClipSave:
         else:
             size_str = f"{sz / 1_048_576:.1f} MB"
         if self.color:
-            fmt_color = {"jpg": "\x1b[35m", "png": "\x1b[36m", "bmp": "\x1b[33m"}
+            fmt_color = {"jpg": "\x1b[35m", "png": "\x1b[36m", "bmp": "\x1b[33m", "webp": "\x1b[32m"}
             c = fmt_color.get(self.fmt, "")
             line = f"  [+] [{self.counter}] {c}{fpath.name}\x1b[0m  [{w}x{h} px, {size_str}]"
         else:
             line = f"  [+] [{self.counter}] {fpath.name}  [{w}x{h} px, {size_str}]"
-        self._file_lines.append(line)
-        if self._auto_scroll and self._scroll_top >= 0:
-            hcon = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-            csbi = CONSOLE_SCREEN_BUFFER_INFO()
-            if kernel32.GetConsoleScreenBufferInfo(hcon, ctypes.byref(csbi)):
-                visible_rows = csbi.srWindow.Bottom - self._scroll_top + 1
-                if visible_rows > 0:
-                    self._scroll_offset = max(0, len(self._file_lines) - visible_rows)
-        self._redraw_file_list()
+        self._append_file_line(line)
         self._beep(1500, 100)
 
     # ── console helpers ─────────────────────────────────────
@@ -834,11 +896,16 @@ class ClipSave:
         print(f"{S}  =========================================================={R}")
         onoff_fmt = f"{G}ON{R}" if self.color else "ON"
         print(f"    {B}ClipSave - clipboard monitor active: {onoff_fmt}")
-        print(f"{S}    v0.5 - Igor Brzeżek - github.com/IgorBrzezek/ClipSave{R}")
+        print(f"{S}    v{SCRIPT_VERSION} - Igor Brzeżek - github.com/IgorBrzezek/ClipSave{R}")
         print(f"{S}  =========================================================={R}")
         print(f"  {Y}Directory{R} : {C}{self.directory}{R}")
         bpp_str = bpp_desc[self.bpp]
         print(f"  {Y}Format{R}    : {C}{self.fmt.upper()}{R}   {Y}BPP{R}: {self.bpp} ({bpp_str})")
+        if self.fmt == "webp":
+            if self.webp_lossless:
+                print(f"  {Y}WebP{R}     : {C}lossless{R}")
+            else:
+                print(f"  {Y}WebP{R}     : {C}lossy, quality {self.webp_quality}{R}")
         print(f"  {Y}Names{R}     : {C}{self.name_mode}{R}")
         print()
         print(f"{S}  Waiting for images in clipboard...  (Ctrl+C = exit){R}")
@@ -890,16 +957,18 @@ def parse_args(argv):
         print(SHORT_HELP)
         sys.exit(0)
 
-    VALID_FMT = {"png", "jpg", "bmp"}
+    VALID_FMT = {"png", "jpg", "bmp", "webp"}
     VALID_BPP = {8, 16, 24}
 
     cfg = {
         "directory": ".",
         "fmt": "png",
-        "bpp": 16,
+        "bpp": 24,
         "name": "DATETIME",
         "overwrite": False,
         "compression": -1,
+        "webp_quality": 80,
+        "webp_lossless": False,
         "color": False,
         "beep": False,
         "keys_modifiers": MOD_CONTROL | MOD_SHIFT,
@@ -920,10 +989,10 @@ def parse_args(argv):
         elif arg == "-f":
             i += 1
             if i >= len(argv):
-                _die("-f requires argument FORMAT (png|jpg|bmp)")
+                _die("-f requires argument FORMAT (png|jpg|bmp|webp)")
             val = argv[i].lower()
             if val not in VALID_FMT:
-                _die(f"Unknown format '{val}'. Allowed: png, jpg, bmp")
+                _die(f"Unknown format '{val}'. Allowed: png, jpg, bmp, webp")
             cfg["fmt"] = val
 
         elif arg == "--bpp":
@@ -957,6 +1026,21 @@ def parse_args(argv):
             except ValueError:
                 _die(f"-c: '{argv[i]}' is not a number")
             cfg["compression"] = val
+
+        elif arg == "--webpq":
+            i += 1
+            if i >= len(argv):
+                _die("--webpq requires an argument N (1-100)")
+            try:
+                val = int(argv[i])
+            except ValueError:
+                _die(f"--webpq: '{argv[i]}' is not a number")
+            if not 1 <= val <= 100:
+                _die(f"--webpq: {val} -- allowed values: 1-100")
+            cfg["webp_quality"] = val
+
+        elif arg == "--webplossless":
+            cfg["webp_lossless"] = True
 
         elif arg == "--overwrite":
             cfg["overwrite"] = True
@@ -1019,6 +1103,8 @@ def main():
         name_mode=cfg["name"],
         overwrite=cfg["overwrite"],
         compression=cfg["compression"],
+        webp_quality=cfg["webp_quality"],
+        webp_lossless=cfg["webp_lossless"],
         color=cfg["color"],
         beep=cfg["beep"],
         keys_modifiers=cfg["keys_modifiers"],

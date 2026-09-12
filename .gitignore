@@ -4,7 +4,13 @@ __pycache__/
 *.png
 *.bmp
 *.tmp
+*.temp
 *.bak
 *.zip
+*.o
+*.dll
+*.webm
+*.webp
+webm_test/
+webp_test/
 nul
-
