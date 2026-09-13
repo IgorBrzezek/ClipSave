@@ -7,10 +7,15 @@ __pycache__/
 *.temp
 *.bak
 *.zip
+*.tar.gz
 *.o
 *.dll
 *.webm
 *.webp
+clipsave.exe
+release/
+libwebp-1.4.0/
+libwebp/
 webm_test/
 webp_test/
 nul

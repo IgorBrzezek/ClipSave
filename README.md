@@ -12,6 +12,7 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 
 - SCRIPT_AUTH = "Igor Brzeżek"
 - SCRIPT_VERSION = 0.9
+- SCRIPT_DATE = 13.09.2026
 - SCRIPT_GITHUB = "https://github.com/IgorBrzezek/ClipSave"
 
 ---
@@ -27,8 +28,10 @@ Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** w
 
 - ANSI C version:
 - **Windows** 10 or 11
-- To **build**: MSYS2 UCRT64 with `mingw-w64-ucrt-x86_64-gcc`, `cmake`, `make` (libwebp is built from source and statically linked into the exe — see *Build on Windows* below)
-- To **run**: a single standalone `clipsave.exe` — no DLLs required
+- To **build** (two routes):
+  1. **`compile.cmd` (recommended, clean Windows)** — needs only a plain **MinGW-w64 gcc** on PATH (`gcc.exe` + `ar.exe`). The script downloads the libwebp source, builds the static library itself, and compiles `clipsave.exe` — **no cmake, no make, no MSYS2 needed**. See *Build — Windows, clean system* below.
+  2. **MSYS2 UCRT64** with `mingw-w64-ucrt-x86_64-gcc`, `cmake`, `make` (libwebp is built from source and statically linked into the exe — see *Build on Windows* below)
+- To **run**: a single standalone `clipsave.exe` — no DLLs required (either route produces the same exe)
 
 ---
 
@@ -234,6 +237,16 @@ A standalone C port (`clipsave.c` + `webp_save.c`) with identical functionality 
 
 WebP is a still-image format: unlike the old WebM output (VP9 in a video container, which many media players refused to show), WebP files open in any image viewer or web browser as a normal picture, with real image compression (lossy VP8 or lossless VP8L).
 
+**Building** — three routes, each producing the same single `clipsave.exe` with libwebp linked statically (no DLLs at runtime):
+
+| Route | What you need | Command |
+|-------|---------------|---------|
+| Windows, clean system | plain **MinGW-w64 gcc** (`gcc` + `ar`) on PATH | `compile.cmd` |
+| Windows, MSYS2 UCRT64 | `mingw-w64-ucrt-x86_64-gcc`, `cmake`, `make` | `bash dl_webp.sh && bash build_webp_lib.sh && bash build_final.sh` |
+| Linux → Windows exe | `sudo apt` + MinGW-w64 | `bash build_linux.sh` |
+
+Full step-by-step instructions for each route are in the sections below.
+
 ### Requirements — Windows
 
 Build inside **MSYS2 UCRT64** (install from <https://www.msys2.org>, then launch *MSYS2 UCRT64* from the Start menu). Install the toolchain and build tools:
@@ -287,6 +300,29 @@ Flag details:
 
 **No runtime DLLs:** libwebp is linked statically into `clipsave.exe`, so a single copy of the exe is all you need. No `libwebp-*.dll`, no `libvpx-1.dll`, no `libwinpthread-1.dll`.
 
+### Build — Windows, clean system (`compile.cmd`)
+
+If you don't want MSYS2, a plain **MinGW-w64 gcc** is enough. `compile.cmd` does the whole job on a clean Windows 10/11:
+
+1. Downloads the **libwebp 1.4.0** source (`curl.exe` is built into Windows; falls back to PowerShell).
+2. Extracts it (built-in `tar`, or PowerShell `Expand-Archive`).
+3. Builds **`libwebp.a` + `libsharpyuv.a` statically** directly with `gcc` + `ar` — no CMake, no make, no configure.
+4. Compiles **`clipsave.exe`** (`clipsave.c` + `webp_save.c`, WebP statically linked).
+
+Steps:
+
+1. Install a MinGW-w64 toolchain and put its `bin` folder on `PATH`:
+   - **WinLibs** (easiest on a clean machine): https://winlibs.com — download a UCRT zip, unzip, add `mingw64\bin` to `PATH`.
+   - **MSYS2** (without using its terminal): https://www.msys2.org — `pacman -S mingw-w64-ucrt-x86_64-gcc`, then `C:\msys64\ucrt64\bin` on `PATH`.
+2. From the project folder run:
+   ```bat
+   compile.cmd
+   ```
+   First run downloads and builds libwebp (takes a minute or two). Re-runs skip that if `libwebp-1.4.0\build\libwebp.a` already exists.
+3. Result: `clipsave.exe` in the same folder — single file, no DLLs. Test: `clipsave.exe -h` and `clipsave.exe -f webp --webpq 75`.
+
+Error messages point to the log `libwebp-1.4.0\build\gcc.log` if the library build fails. If `curl`/`tar` are unavailable (very old Windows), download the zip manually into the project folder as `libwebp-1.4.0.zip` and re-run.
+
 ### Cross-compile — Linux → Windows exe
 
 You can produce a Windows `clipsave.exe` from Linux. On Debian/Ubuntu the MinGW-w64 toolchain is available, but the distro does **not** ship a *libwebp* for MinGW, so libwebp must be built from source for the `win64` target first.
@@ -309,7 +345,7 @@ Step by step:
        -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF \
        -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBPINFO=OFF \
        -DWEBP_BUILD_WEBPMUX=OFF -DWEBP_BUILD_EXTRAS=OFF \
-       -DWEBP_USE_THREAD=ON
+       -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_USE_THREAD=ON
    cmake --build build --config Release -j"$(nproc)"
    cd ..
    ```
@@ -326,6 +362,8 @@ The whole flow is available as a script:
 ```bash
 bash build_linux.sh
 ```
+
+Works as-is on Debian/Ubuntu: the source uses lowercase MinGW header names (`wincon.h`), which resolve correctly on Linux's case-sensitive file system as well as on Windows' case-insensitive one. The script builds `libwebp.a` from source, compiles a **PE32+ x86-64** `clipsave.exe`, and needs no manual fix-ups.
 
 ### Distribute (release)
 

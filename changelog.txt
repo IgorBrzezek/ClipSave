@@ -29,10 +29,36 @@ Changes
     SCRIPT_VERSION raised to 0.9 (feature parity with the C version).
   - Updated help, banner, README and build scripts (build_final.sh,
     build_linux.sh) accordingly.
+  - New compile.cmd: build on a clean Windows 10/11 with only a plain
+    MinGW-w64 gcc (+ ar) on PATH - no cmake, no make, no MSYS2.  It
+    downloads the libwebp 1.4.0 source, builds libwebp.a +
+    libsharpyuv.a statically with gcc + ar, and compiles clipsave.exe.
+  - README now documents all three ways to build the C version:
+    MSYS2 UCRT64 (dl_webp.sh + build_webp_lib.sh), clean Windows
+    (compile.cmd), and cross-compile from Linux (build_linux.sh).
+  - `#include <WinCon.h>` lowered to `<wincon.h>` so the same source
+    builds both on Windows (case-insensitive file system) and with the
+    MinGW-w64 cross-toolchain on Linux (case-sensitive file system,
+    where the header is only shipped lowercase).
+  - Fixed garbage in the version/date in help and banner: VERSION and
+    DATE are now wide string literals (L"0.9", L"13.09.2026").  They
+    were narrow char* passed to %s in wprintf, which expects wchar_t*,
+    so the CRT misread them (e.g. "Version: 9", blank date).
 
 Build
-  Static libwebp 1.4.0 is built from source via build_webp_lib.sh
-  (CMake, printers/tools disabled); link with -lwebp -lsharpyuv -lm.
+  The C version can be built in three ways (all produce the same
+  standalone clipsave.exe with libwebp linked statically):
+
+   1. Windows, clean system:  compile.cmd
+      needs only MinGW-w64 gcc/ar on PATH; downloads libwebp 1.4.0,
+      builds libwebp.a + libsharpyuv.a directly with gcc + ar
+      (no configure / cmake / make).
+   2. Windows, MSYS2 UCRT64:  bash dl_webp.sh && bash build_webp_lib.sh
+      (CMake build, printers/tools disabled).
+   3. Linux -> Windows cross-compile:  bash build_linux.sh
+      (needs sudo; installs mingw-w64 and builds libwebp for win64).
+
+  Link in every case with -lwebp -lsharpyuv -lm.
 
 Testing
   Verified on Windows 10 (build 19045): all four WebP variants encode
@@ -40,6 +66,8 @@ Testing
   vs. the source 24-bit RGB frame (0 differing pixels); lossy q80 shows
   normal artifacts (229128 differing pixels).  File sizes scale with
   quality: q10=2.5 KB, q80=5.0 KB, q100=15.1 KB, lossless=1.2 KB.
+  Linux -> Windows cross-compile (build_linux.sh, Debian/Ubuntu) now
+  compiles cleanly end-to-end and produces a PE32+ x86-64 clipsave.exe.
 
 Version: 0.9
 

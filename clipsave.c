@@ -18,7 +18,7 @@
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
 #endif
-#include <WinCon.h>
+#include <wincon.h>
 #include <objidl.h>
 #include <objbase.h>
 #include <gdiplus.h>
@@ -43,6 +43,7 @@
 
 #define AUTHOR L"Igor Brzezek"
 #define VERSION L"0.9"
+#define DATE L"13.09.2026"
 #define GITHUB L"https://github.com/IgorBrzezek/ClipSave"
 
 
@@ -1206,13 +1207,18 @@ static void die(const WCHAR* msg) {
     exit(2);
 }
 
+static void HelpHeader() {
+	wprintf(L"Author: Igor Brzezek, Version: %s, Date: %s, GitHub: https://github.com/IgorBrzezek/ClipSave\n\n", VERSION, DATE);
+}
+
 static void parse_args(int argc, WCHAR* argv[]) {
     for (int i = 1; i < argc; i++) {
         const WCHAR* arg = argv[i];
 
         if (wcscmp(arg, L"--help") == 0) {
             wprintf(L"\n");
-            wprintf(L"ClipSave - Windows Clipboard Monitor  v%s\n\n", VERSION);
+            wprintf(L"ClipSave - Windows Clipboard Monitor\n\n");
+			HelpHeader();
             wprintf(L"DESCRIPTION\n");
             wprintf(L"  Listens for clipboard image changes via AddClipboardFormatListener.\n");
             wprintf(L"  Saves images as PNG/JPEG/BMP/WebP with optional color depth conversion.\n\n");
@@ -1259,7 +1265,8 @@ static void parse_args(int argc, WCHAR* argv[]) {
         }
 
         if (wcscmp(arg, L"-h") == 0) {
-            wprintf(L"ClipSave - capture images from Windows clipboard\n");
+            wprintf(L"ClipSave - Windows Clipboard Monitor\n\n");
+			HelpHeader();
             wprintf(L"Usage: clipsave.exe [-d DIR] [-f FMT] [--bpp N] [-c N] [--webpq N] [--webplossless] [--name MODE] [--overwrite] [--color] [--beep] [--keys MOD-MOD-KEY]\n");
             wprintf(L"  -h             This help\n");
             wprintf(L"  --help         Full documentation\n");

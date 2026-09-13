@@ -46,6 +46,8 @@ except ImportError:
 SHORT_HELP = """\
 ClipSave - capture images from Windows clipboard
 
+Author: Igor Brzezek, Version: 0.9, GitHub: https://github.com/IgorBrzezek/ClipSave
+
 Usage:  python clipsave.py [-d DIRECTORY] [-f FORMAT] [--bpp N] [--name MODE]
 
   -h            This help (short)
@@ -73,6 +75,8 @@ LONG_HELP = """\
 ===================================================================
            ClipSave - Windows Clipboard Monitor  v0.9
 ===================================================================
+
+Author: Igor Brzezek, Version: 0.9, GitHub: https://github.com/IgorBrzezek/ClipSave
 
 DESCRIPTION
   ClipSave registers as a Windows clipboard listener via the native
