@@ -6,6 +6,8 @@ Triggered by: Snipping Tool, Win+Shift+S, Print Screen, Ctrl+C on an image, or a
 
 Uses the native `AddClipboardFormatListener` API — **zero polling, ~0% CPU** while waiting.
 
+![Example screen of clipsave.exe](images/clipsave.webp)
+
 ---
 
 # Author
