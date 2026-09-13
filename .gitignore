@@ -8,6 +8,8 @@ __pycache__/
 *.bak
 *.zip
 *.tar.gz
+*.tar
+*.gz
 *.o
 *.dll
 *.webm

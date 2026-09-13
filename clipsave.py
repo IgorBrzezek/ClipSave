@@ -907,9 +907,9 @@ class ClipSave:
         print(f"  {Y}Format{R}    : {C}{self.fmt.upper()}{R}   {Y}BPP{R}: {self.bpp} ({bpp_str})")
         if self.fmt == "webp":
             if self.webp_lossless:
-                print(f"  {Y}WebP{R}     : {C}lossless{R}")
+                print(f"  {Y}WebP{R}      : {C}lossless{R}")
             else:
-                print(f"  {Y}WebP{R}     : {C}lossy, quality {self.webp_quality}{R}")
+                print(f"  {Y}WebP{R}      : {C}lossy, quality {self.webp_quality}{R}")
         print(f"  {Y}Names{R}     : {C}{self.name_mode}{R}")
         print()
         print(f"{S}  Waiting for images in clipboard...  (Ctrl+C = exit){R}")

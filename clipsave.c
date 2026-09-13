@@ -1104,7 +1104,7 @@ static void print_banner(void) {
     if (cfg.bpp == 'P') wprintf(L"P"); else wprintf(L"%d", cfg.bpp);
     wprintf(L" (%s)\n", bpp_str);
     if (wcscmp(cfg.fmt, L"webp") == 0) {
-        wprintf(L"  %sWebP%s    : %s%d%s %s\n",
+        wprintf(L"  %sWebP%s      : %s%d%s %s\n",
             g_color ? L"\x1b[33m" : L"",
             g_color ? L"\x1b[0m" : L"",
             g_color ? L"\x1b[36m" : L"",
